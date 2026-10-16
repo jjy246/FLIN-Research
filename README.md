@@ -1,232 +1,138 @@
-# FLIN — Feature-Link Intelligence Network
+# FLIN — Feature-Link Intellegence Network
 
-**An open-source, experimental framework for source-grounded associative memory research.**
+Repository: **https://github.com/jjy246/FLIN-Research**
 
-> **Important scope:** The executable application in this repository is the
-> **mathematics-specific reference implementation**. Its automatic collection,
-> relevance filters, memory-unit acceptance criteria and problem-generation
-> pipeline are **designed for mathematics**, including mathematical applications
-> in other fields. It is **not** an out-of-the-box knowledge-network builder for
-> physics, medicine, history, or every other domain. **You are welcome to fork
-> the code and adapt those stages for your own area of knowledge.**
+## What this release changes
 
-FLIN explores whether source-grounded input clusters can create memory units and
-reinforce directed pathways which later guide pulse-based associations.
-Memory retrieval is not embedding-based; a **separate, optional Ollama component**
-drafts and critiques mathematics research questions. These engineering choices
-are **research hypotheses**, not established neuroscience or verified intelligence.
+This release is a **non-rewrite extension of the supplied `questioning(20261016-133501).py`**. Upload the downloadable `question.py` to your original repository to replace the previous main script. It retains the original literature discovery pipeline, SQLite networks, 3D desktop interface, FLIN pulse simulator, source citations, and ten-question author/reviewer workflow.
 
-**Welcome to the FLIN community!** We invite constructive suggestions,
-rigorous criticism, experiments, documentation improvements, new software
-modules, forks for other knowledge domains, and contributed memory networks.
-Sharing reproducible successes **and failures** helps the whole community.
+The **main FLIN workspace is presented in English**. Some inherited auxiliary dialogs, legacy diagnostics and original review prompts still contain Chinese text; this update intentionally leaves those original pathways largely intact to minimize regressions. Generated new question text is explicitly requested in English.
 
-## FLIN Community Network Hub — share your research 🧠
+## Theory and implementation
 
-**[Explore and share community networks (GitHub Discussions)](https://github.com/jjy246/FLIN-Research-Desktop/discussions)** · **[Download official reviewed networks (Releases)](https://github.com/jjy246/FLIN-Research-Desktop/releases)**
+The pipeline remains:
 
-We welcome memory networks, novel experiments, theory critiques, suggestions,
-and independently developed FLIN forks for **any field of knowledge**. The
-unmodified official collection pipeline is **mathematics-specific**; other
-subjects require contributor adaptations and a clearly identified compatible
-fork. A community post is not an endorsement or a guarantee of import
-compatibility.
+```text
+Literature (Wikipedia / academic APIs)
+    -> math-quality screening and source-grounded attention
+    -> effective input cluster (original sentence and offsets)
+    -> SSRS routing/order
+    -> create or update triggerable feature memories
+    -> learn directed, experience-driven links
+    -> evaluate repeated association patterns
+    -> optionally materialize a shortcut memory group
+    -> weighted single-path pulse association
+    -> math question generation / evidence review
+```
 
-**Three ways to participate:**
+### 1. First qualified experience creates a memory
 
-1. **Share freely in Network Showcase.** Host your `.sqlite3` in your own
-   GitHub Release, then post its download link, SHA-256 checksum, research
-   method, data rights, and compatible FLIN/fork version in
-   [Discussions](https://github.com/jjy246/FLIN-Research-Desktop/discussions).
-   No official approval is required to discuss or showcase your work.
-2. **Exchange ideas and results.** Join *Research & Experiments*, *Ideas &
-   Theories*, *Domain Extensions*, or *Help & Questions*. Reproducible negative
-   results and constructive criticism are welcome.
-3. **Apply for optional official publication.** Use the
-   [Network Submission form](https://github.com/jjy246/FLIN-Research-Desktop/issues/new?template=network_submission.yml)
-   if you want maintainers to review and republish your network in the
-   project's official Releases. Only networks actually usable in the official
-   mathematics app qualify for those official reference-network assets.
+A new, grounded mathematical feature with no verified equivalent in the existing network is immediately admitted as an **active, triggerable memory unit**. It does **not** wait for two or more independent sources. This preserves the project's first-input principle. Subsequent effective inputs strengthen learned associations. A new primitive is not suppressed merely because an unvalidated cost estimate claims that it can be reconstructed.
 
-Community-hosted `.sqlite3` snapshots and **official reviewed** snapshots are
-separate collections. Neither is scientifically certified. For download,
-sharing and import instructions see the **[Community Network Hub guide](docs/COMMUNITY_HUB.md)**.
+### 2. Source-grounded effective input and SSRS
 
-## Get FLIN and choose your path
+The existing attention/feature filters extract literal mathematical terms from actual document sentences. `abc_extract_input_clusters()` preserves each source sentence, label, source URL and observed position. `abc_ingest_cluster()` applies the original quality and provenance checks and SSRS ordering. The original `abc_reconcile_pending()` forms directed, idempotent connections from these observed inputs.
 
-| I want to… | Start here |
-| --- | --- |
-| Run the current mathematics desktop application | [Installation](#install-and-run) · [Complete user manual](docs/USER_GUIDE.md) |
-| Understand the proposed FLIN mechanism | [FLIN theory](docs/FLIN_THEORY.md) · [Architecture](docs/ARCHITECTURE.md) |
-| Adapt the code to another knowledge domain | [Porting guide](docs/PORTING_OTHER_DOMAINS.md) · [Contributing](CONTRIBUTING.md) |
-| Download and **use** a shared `.sqlite3` network | [GitHub Releases](https://github.com/jjy246/FLIN-Research-Desktop/releases) · [Import instructions](#download-and-use-a-memory-network) |
-| Explore or share community-created networks | [FLIN Community Network Hub](docs/COMMUNITY_HUB.md) · [Discussions](https://github.com/jjy246/FLIN-Research-Desktop/discussions) |
-| Share my own network for official review | [Network submission form](https://github.com/jjy246/FLIN-Research-Desktop/issues/new?template=network_submission.yml) · [Review guide](docs/COMMUNITY_NETWORKS.md) |
-| Report bugs or propose an improvement | [Issue templates](https://github.com/jjy246/FLIN-Research-Desktop/issues/new/choose) |
-| Help improve the open-source code | [Contribution guide](CONTRIBUTING.md) |
-| Maintain/publish this repository | [Start-to-finish GitHub setup](docs/OPEN_SOURCE_LAUNCH.md) |
+**Important:** Source order is not mathematical implication, causality, or a theorem. A shortcut is a learned routing pattern, never a proof that its endpoints are logically equivalent.
 
-## Install and run
+### 3. Association-cost evaluation
 
-The full Python application is included (`flin_desktop.py`); **this is not a
-README-only project**. You can run it from source or, after CI builds are
-completed, download an unsigned portable desktop build from Actions/official
-Releases. **This ZIP does not already contain native `.exe` or `.app` builds.**
+Repeated SSRS input paths of **at least four** distinct, active feature memories can be considered for shortcuts. Each observed pattern has an ordered member list and evidence pointers. Documents are counted once per pattern. Default eligibility is **three independent document IDs**, positive estimated benefit greater than `0.5`, and no concurrent ties in the SSRS path.
 
-| Platform | Source launcher | Instructions |
-| --- | --- | --- |
-| Windows 10/11 | `start_windows.bat` | [Windows guide](docs/INSTALL_WINDOWS.md) |
-| macOS Intel / Apple Silicon | `start_macos.command` | [macOS guide](docs/INSTALL_MACOS.md) |
-| Ubuntu / Linux | `./start_linux.sh` | [Linux guide](docs/INSTALL_LINUX.md) |
+For a path containing `n` memories supported by `s` distinct sources, the **experimental engineering cost proxy** is:
 
-With Python **3.12** installed, from the repository folder on Linux/macOS:
+```text
+expected_uses        = s * (1 + ln(1 + s))
+original_path_cost   = expected_uses * (n - 1) * per_hop_cost
+shortcut_total_cost  = expected_uses * 2 * per_hop_cost
+                       + formation_cost + storage_cost + interference_cost
+net_savings          = original_path_cost - shortcut_total_cost
+```
+
+Defaults in `question.py`:
+
+| Parameter | Value |
+|---|---:|
+| Minimum member memories | 4 |
+| Maximum member memories | 6 |
+| Independent document threshold | 3 |
+| Per-hop cost | 1.0 |
+| Formation cost | 2.5 |
+| Storage cost | 0.8 |
+| Interference cost | 0.6 |
+| Minimum net savings | 0.5 |
+
+These constants are **heuristics, not experimentally fitted performance numbers**. In particular, `expected_uses` is a proxy inferred from observed source frequency, not a measured future query distribution. The decision is therefore reproducible, testable, and replaceable—not a claim of optimal human memory behavior.
+
+### 4. Shortcut memory groups
+
+If the cost test passes for observed `A -> B -> C -> D`, FLIN creates a **new triggerable shortcut memory** containing the ordered member IDs. It adds a pair of directed associations:
+
+```text
+A -> [shortcut(A,B,C,D)] -> D
+```
+
+The original route **A -> B -> C -> D** and its source evidence remain untouched. Each extra independent document can reinforce the shortcut. The shortcut's definition explicitly states that it represents an associative optimization, not a proved mathematical transformation.
+
+Shortcuts are deliberately not recursively chunked in this prototype. More sophisticated nested composition and safe shortcut invalidation remain future research tasks.
+
+## Run the existing application
+
+Python **3.10+** on Ubuntu is supported by the original source. Install Tkinter through your operating system and Python packages in a virtual environment:
 
 ```bash
+sudo apt install python3-tk
 python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python flin_desktop.py
+source .venv/bin/activate
+pip install requests beautifulsoup4 numpy networkx matplotlib scikit-learn pymupdf
+python question.py
 ```
 
-On Windows PowerShell, use:
+PyMuPDF is optional unless reading source PDFs. Some features invoke locally installed Ollama models; the core SQLite build and cost-reporting mechanism do not require Ollama.
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe flin_desktop.py
-```
+### Start or continue your own network
 
-Linux GUI users may also need `python3-tk` and `python3-venv`. Starting from
-source requires a graphical display for the desktop GUI. API-based research
-collection requires internet connectivity. Ollama and its models are optional
-and only needed for local language-model question generation.
+In the GUI, use **Start Building (Literature → FLIN)**. The existing per-network SQLite database and research-source index continue to be used. Stop any previously running instance before launching an updated version against the same network.
 
-For a fully offline, **synthetic** first example:
+The new FLIN section also provides:
+
+- **Reevaluate Existing Input Costs (1,000 clusters)** — analyze source-grounded SSRS clusters already stored in the network, incrementally and without re-downloading papers.
+- **Shortcut and Cost Report** — inspect shortcut units and experimental cost estimates.
+
+The same functionality is available over SSH:
 
 ```bash
-python scripts/demo_offline.py
+python question.py --flin-info
+python question.py --flin-retrofit --flin-retrofit-limit 1000
+python question.py --flin-efficiency-report
 ```
 
-It creates temporary memory units/links, simulates pulses, and cleans up. This
-demonstration is **not** evidence of mathematical knowledge or a validated
-brain model.
-
-## Build a mathematics memory network
-
-1. Launch the app; under **Manage Networks / Create / Switch / Import**, create
-   a fresh network so existing data is not changed.
-2. Open **Automatic Build Network Settings**. Turn off continuous discovery for
-   your first test, select a small budget such as **3 topics × 5 papers**, and
-   leave full PDF fetching off at first.
-3. Start collection. The application queries public research sources, stores
-   provenance, extracts mathematics-focused input clusters, and learns directed
-   associations from qualified external inputs.
-4. Inspect input clusters and original source evidence before interpreting a
-   memory unit or an edge. Missing, incorrect or weak evidence is possible.
-5. Open **FLIN Directed Pulse Associations**, select an **existing memory
-   label**, and simulate pulse propagation. Visualized weights are **routing
-   preferences**, not proofs, entailments or semantic similarity scores.
-6. Export a complete SQLite snapshot before major experiments.
-
-[Read the detailed operating manual](docs/USER_GUIDE.md).
-
-## Download and use a memory network
-
-**[Browse published SQLite memory networks](https://github.com/jjy246/FLIN-Research-Desktop/releases)**
-
-Published releases may contain a **directly downloadable `.sqlite3`
-asset**, such as `v1.sqlite3` or `association.sqlite3`. If no SQLite asset is visible, no network snapshot has been published
-yet. Downloads may include maintainer networks and community networks that
-passed the official **manual review process**.
-
-1. Download a `.sqlite3` file from the **Assets** section of a network release.
-2. Start FLIN and open **Manage Networks / Create / Switch / Import**.
-3. Click **Import SQLite**, choose your download, and give it a new local name.
-4. Switch to the imported independent network, explore its memories and simulate
-   associations. Your current network is **not overwritten**.
-
-Alternatively, the app has **Browse Published Networks (GitHub Releases)**;
-it can discover and download published SQLite assets. Downloads are subject
-to network availability and GitHub API limits. A terminal import also works:
+For a separate new database, you can also run:
 
 ```bash
-python flin_desktop.py --import-network /path/to/association.sqlite3 --network-name "Shared network"
+python question.py --flin-create-network "My Mathematics Network"
 ```
 
-**Only import networks you trust.** An officially reviewed snapshot has been
-checked for format/provenance and usable links, **not** certified as safe,
-mathematically true or scientifically valid. See
-[sharing, review and release rules](docs/COMMUNITY_NETWORKS.md).
+### Offline regression tests
 
-## Share your own network
+Place `test_question_flin.py` next to `question.py`, then run:
 
-**Everyone is welcome to submit a source-attributed FLIN network for review.**
-Contributions need not be mathematically successful to be interesting, but an
-**official downloadable SQLite release must currently be importable by this
-mathematics reference application**. Other-domain forks with incompatible
-schemas should publish their own releases or propose an interoperability change
-via an Issue/PR; they are not silently treated as compatible.
+```bash
+python test_question_flin.py
+```
 
-1. Export **complete memory network → SQLite** in the app, or run:
-   `python flin_desktop.py --export-network ./exports --export-format sqlite`.
-2. Locate the exported `association.sqlite3` inside its new timestamped
-   directory. **Never upload the live changing database.**
-3. Validate your export and calculate its SHA-256 hash:
-   `python scripts/inspect_network_snapshot.py PATH/association.sqlite3 --require-flin`.
-4. Upload your snapshot to a location with a public download link (preferably
-   a Release in your own repository). Provide source details and redistribution
-   permissions.
-5. [Open a Network Submission issue](https://github.com/jjy246/FLIN-Research-Desktop/issues/new?template=network_submission.yml)
-   with its download URL, checksum, FLIN version, reproducible example and
-   limitations. Only maintainers publish accepted copies in official Releases.
+The tests use disposable SQLite databases, no Internet access, and no Ollama. They verify first-input activation, independent-source counting, positive-cost shortcut creation, exclusion of shorter paths, resumable retrofit, shortcut reinforcement, and original-graph nonmodification.
 
-**Do not commit `.sqlite3` databases, academic PDFs, private documents or API
-secrets to Git.** The `.gitignore` excludes them. The project's Apache-2.0
-source-code license **does not automatically license research databases**.
+## Data and compatibility
 
-## Adapt FLIN to a new knowledge domain
+The existing `abc_*` SQLite tables remain in place. New additive tables are `flin_patterns`, `flin_pattern_evidence`, `flin_shortcut_members` and `flin_cost_decisions`. The portable export format includes them. Existing `units`/`edges` legacy tables are not populated by this new FLIN learning path.
 
-**Fork the repository** and customize the topic discovery, subject-specific
-quality gates, input clustering and relation extraction for the target domain.
-The current main program *forces mathematics* for collection and fresh network
-creation; changing names or toggling a UI field is not sufficient. Keep the
-learning rules and SQLite compatibility requirements explicit, and test any
-changes rather than declaring conceptual truth from a link weight.
+Before replacing an existing GitHub file or upgrading a database, make a normal backup of both your code and `~/.local/share/brain_project/` database files. The new database schema is additive; older program versions will not know how to use the new efficiency tables.
 
-[Step-by-step domain-porting map](docs/PORTING_OTHER_DOMAINS.md) ·
-[Contribution and fork guidelines](CONTRIBUTING.md).
+## Research limitations
 
-## How the model works (short version)
-
-1. Public literature/source records are collected with provenance.
-2. A lexical, mathematics-specific quality gate extracts **effective input
-   clusters** of source-observed features.
-3. Repeated qualified *external input* strengthens directed memory links.
-4. During recall, a pulse follows **one** allowed outgoing edge chosen by
-   relative link weight, and does not immediately reverse along the last edge.
-5. Pulse arrival **frequency** and a threshold determine visible responses.
-6. The question generator, when enabled, uses local Ollama separately.
-
-The literature/evidence graph (`units`, `edges`) and FLIN associative graph
-(`abc_units`, `abc_edges`) are different. The current system is a software
-prototype; biological claims and mathematical conclusions need independent
-validation. [Full technical explanation](docs/FLIN_THEORY.md).
-
-## Community and governance
-
-- **Source code license:** [Apache License 2.0](LICENSE). Forks and modifications
-  are permitted under its terms. [Licensing details](LICENSING.md).
-- **Community networks, research exchange, ideas and questions:** [Discussions](https://github.com/jjy246/FLIN-Research-Desktop/discussions) · [Community Hub](docs/COMMUNITY_HUB.md).
-- **Bug reports and tracked feature requests:** [Issues](https://github.com/jjy246/FLIN-Research-Desktop/issues/new/choose).
-- **Code/doc improvements:** [Pull requests](CONTRIBUTING.md).
-- **Network submissions:** [Review request form](https://github.com/jjy246/FLIN-Research-Desktop/issues/new?template=network_submission.yml).
-- **Security reports:** [Security policy](SECURITY.md) — please do not post
-  exploitable vulnerabilities publicly before coordinated review.
-- **Rules and decision-making:** [Governance](GOVERNANCE.md) ·
-  [Code of Conduct](CODE_OF_CONDUCT.md).
-- **First-time maintainer launch:** [Complete checklist](docs/OPEN_SOURCE_LAUNCH.md), [starter community issues](docs/COMMUNITY_STARTER_TASKS.md), [Community Hub maintainer setup](docs/MAINTAINER_HUB_SETUP.md), and [launch announcement](docs/COMMUNITY_ANNOUNCEMENT.md).
-
-**Open invitation:** Whether you're studying mathematics, adapting the code to
-another subject, checking a research assumption, or building tools around FLIN,
-please share what you discover. Forks and independently published networks are
-welcome. Let's make reproducible experimental associative-memory research easier
-to inspect, challenge and improve.
+- Actual live multi-source literature collection and local Ollama question-review performance must still be validated in the deployment environment.
+- The current attention and SSRS implementations are engineering approximations of the research theory; they are not biological or mathematical proofs.
+- Stronger association links reflect exposure-driven routing preference, **not** theorem correctness.
+- A shortcut's existence demonstrates estimated savings **under the stated cost model**, not verified savings on real-world workloads. A next experiment should benchmark recall time and accuracy with shortcuts enabled and disabled.
+- A lack of new memories or discovered papers cannot prove that all mathematics has been learned.
