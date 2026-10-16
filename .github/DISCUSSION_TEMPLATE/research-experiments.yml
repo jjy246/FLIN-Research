@@ -1,0 +1,30 @@
+title: "[Experiment] "
+body:
+  - type: input
+    id: question
+    attributes:
+      label: Research question or hypothesis
+      placeholder: "What behavior are you trying to test?"
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: Experiment setup and method
+      description: Include FLIN/fork version, dataset, number of memories, simulation settings and source links.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Observations and results (including negative results)
+      description: Distinguish measurements from interpretations. Include reproducible evidence where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: limitations
+    attributes:
+      label: Limits and next tests
+      description: Include failures, uncertainties, and questions for others.
+    validations:
+      required: true

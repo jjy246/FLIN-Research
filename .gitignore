@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Native builds
+build/
+dist/
+*.spec
+*.app/
+*.exe
+*.dmg
+*.msi
+
+# Local or research data — NEVER commit databases, PDF/papers or model files.
+*.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.db
+*.db-shm
+*.db-wal
+*.pdf
+*.jsonl.gz
+*.model
+*.gguf
+*.log
+*.tmp
+.data/
+data/
+exports/
+backups/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

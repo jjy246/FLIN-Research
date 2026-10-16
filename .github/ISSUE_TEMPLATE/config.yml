@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Read the complete user guide
+    url: https://github.com/jjy246/FLIN-Research-Desktop/blob/main/docs/USER_GUIDE.md
+    about: Check the manual for installation and workflow questions before filing a bug.

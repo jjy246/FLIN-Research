@@ -1,0 +1,39 @@
+title: "[Domain Fork] "
+body:
+  - type: input
+    id: domain
+    attributes:
+      label: Target knowledge domain
+      placeholder: "e.g. history, chemical engineering, biology"
+    validations:
+      required: true
+  - type: input
+    id: repo
+    attributes:
+      label: Fork or extension URL
+      placeholder: "https://github.com/YOU/..."
+    validations:
+      required: true
+  - type: textarea
+    id: changes
+    attributes:
+      label: Domain-specific changes
+      description: Explain modifications to discovery, filtering, extraction, learning, database schema or GUI.
+    validations:
+      required: true
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Network-format compatibility with official mathematics FLIN
+      options:
+        - Tested and compatible
+        - Incompatible / requires this fork
+        - Unknown / not tested
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Reproduction, tests and known limitations
+    validations:
+      required: true

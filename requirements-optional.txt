@@ -1,0 +1,3 @@
+-r requirements.txt
+# Extract text from open-access PDFs (optional; extra RAM/disk required).
+PyMuPDF>=1.23,<2

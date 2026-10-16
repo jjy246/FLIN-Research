@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a reproducible FLIN application issue.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include OS, Python version, and the exact UI/CLI steps (no personal data).
+      placeholder: "1. Start FLIN\n2. Open...\n3. ..."
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Expected vs actual result
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or tracebacks (optional)
+      description: Remove API keys, local private paths and copyrighted source content before sharing.
+    validations:
+      required: false

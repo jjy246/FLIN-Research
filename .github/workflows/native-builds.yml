@@ -1,0 +1,59 @@
+name: Build unsigned native desktop packages
+
+# Run this workflow from GitHub Actions. It creates artifacts, not a signed release.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            label: windows-x64
+          - os: macos-15-intel
+            label: macos-intel-x64
+          - os: macos-15
+            label: macos-apple-silicon-arm64
+          - os: ubuntu-24.04
+            label: linux-x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Linux Tk dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk libgl1 libx11-6 libxcb1
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Run offline tests before packaging
+        run: python -m unittest discover -s tests -v
+      - name: Build native GUI bundle
+        run: python scripts/build_native.py
+      - name: Package on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/FLIN -DestinationPath FLIN-${{ matrix.label }}.zip -Force
+      - name: Package on macOS
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/FLIN.app FLIN-${{ matrix.label }}.zip
+      - name: Package on Linux
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf FLIN-${{ matrix.label }}.tar.gz FLIN
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FLIN-${{ matrix.label }}
+          path: FLIN-${{ matrix.label }}.*
+          if-no-files-found: error
+          retention-days: 14

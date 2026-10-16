@@ -1,0 +1,10 @@
+FLIN — Feature-Link Intelligence Network
+Copyright 2026 FLIN project contributors.
+
+The FLIN project contains an experimental implementation of the FLIN framework.
+The originating project's mathematical research implementation and conceptual
+architecture are documented in README.md and docs/FLIN_THEORY.md.
+
+This notice is not a scientific endorsement or certification of model validity.
+Third-party source documents, academic works, data, and model weights are not
+licensed by the Apache-2.0 license applying to this repository's source code.

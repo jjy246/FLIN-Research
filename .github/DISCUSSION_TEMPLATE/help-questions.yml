@@ -1,0 +1,33 @@
+title: "[Help] "
+body:
+  - type: input
+    id: subject
+    attributes:
+      label: What are you trying to do?
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - macOS Apple Silicon
+        - macOS Intel
+        - Linux
+        - Other / not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Steps attempted and expected result
+      description: Include FLIN version and exact menu/CLI action.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result or error (remove secrets)
+    validations:
+      required: true

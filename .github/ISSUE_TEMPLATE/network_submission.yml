@@ -1,0 +1,69 @@
+name: Submit a FLIN memory network
+description: Propose a source-attributed SQLite memory-network snapshot for maintainer review.
+title: "[Network Submission] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Community memory-network submissions
+        A submission is **not** published automatically. Provide a link to a publicly downloadable `.sqlite3` exported by FLIN. It must have an enabled FLIN graph, active memory units and usable directed associations, and be importable into a fresh FLIN installation. The maintainer will review its integrity, compatibility, data rights, and provenance before deciding whether to publish a copy in this repository's Releases. Do not add SQLite databases to pull requests.
+        Read the [submission and review guide](https://github.com/jjy246/FLIN-Research-Desktop/blob/main/docs/COMMUNITY_NETWORKS.md) before submitting.
+  - type: input
+    id: display_name
+    attributes:
+      label: Network name
+      description: Short descriptive name, preferably including the mathematical domain.
+      placeholder: "Example: Differential Equations — October 2026"
+    validations:
+      required: true
+  - type: input
+    id: download_url
+    attributes:
+      label: Public SQLite download URL
+      description: Direct or public download link to the FLIN full SQLite snapshot (your own GitHub Release is preferred). No login or API key should be needed.
+      placeholder: "https://github.com/your-account/your-network/releases/download/.../association.sqlite3"
+    validations:
+      required: true
+  - type: input
+    id: checksum
+    attributes:
+      label: SHA-256 checksum
+      description: Generate with `sha256sum association.sqlite3` or equivalent.
+      placeholder: "64 hexadecimal characters"
+    validations:
+      required: true
+  - type: input
+    id: flin_version
+    attributes:
+      label: FLIN application version or commit
+      placeholder: "v17.0 / Git commit SHA / release tag"
+    validations:
+      required: true
+  - type: textarea
+    id: sources
+    attributes:
+      label: Data sources and collection method
+      description: Explain where source texts came from and their redistribution permissions. Cite Wikipedia and research providers where relevant.
+      placeholder: "Sources, dates, processing steps, license / redistribution terms..."
+    validations:
+      required: true
+  - type: textarea
+    id: contents
+    attributes:
+      label: Network contents and reproducibility
+      description: Summarize active FLIN memory-unit/edge counts, math topics, how you trained the graph, results of `python scripts/inspect_network_snapshot.py FILE --require-flin`, a reproducible pulse input label, and any limitations.
+      placeholder: "Memory nodes: ...; edges: ...; topics: ...; collection settings: ..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Publication permissions and safety
+      description: Each declaration is required; maintainers may ask for clarification or decline a submission.
+      options:
+        - label: I authorize the FLIN-Research-Desktop maintainer to download, review, and redistribute this specific SQLite snapshot as a public GitHub Release asset with attribution to me.
+          required: true
+        - label: I have reviewed the snapshot for personal information, secrets, unauthorized copyrighted material, and third-party restrictions, and I believe I have the rights required to publish it.
+          required: true
+        - label: I understand that submitting an Issue does not guarantee acceptance or scientific validation of this network.
+          required: true

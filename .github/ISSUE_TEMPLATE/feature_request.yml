@@ -1,0 +1,32 @@
+name: Research idea or feature request
+description: Suggest a research experiment, theoretical correction, usability feature, or domain fork.
+title: "[Idea] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or research question
+      placeholder: What is missing, or what hypothesis would you like to test?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach and evidence
+      placeholder: Explain the change and how to verify it. Link any applicable sources.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Mathematics reference implementation
+        - New knowledge-domain fork
+        - FLIN theory
+        - UI and accessibility
+        - Scientific validation
+        - Docs and community
+        - Other
+    validations:
+      required: true

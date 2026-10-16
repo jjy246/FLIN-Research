@@ -1,0 +1,114 @@
+title: "[Network] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Welcome to Network Showcase! Share your own public SQLite memory network, its provenance, and clear compatibility details. Community sharing **does not mean official endorsement**. Host large files in Releases of a repository you own; do not commit SQLite to Git history. For official review, open the separate Network Submission Issue.
+  - type: input
+    id: name
+    attributes:
+      label: Network name
+      placeholder: "e.g. Linear Algebra Memory Network v1"
+    validations:
+      required: true
+  - type: dropdown
+    id: domain
+    attributes:
+      label: Knowledge domain
+      options:
+        - Mathematics
+        - Physics
+        - Engineering
+        - Biology
+        - Medicine and Health
+        - Computer Science
+        - Social Sciences
+        - Humanities and History
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: overview
+    attributes:
+      label: What does this network represent?
+      description: Describe the source materials, kinds of memory units, links, and purpose.
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: Author or maintainer
+      placeholder: "@your-handle / project URL"
+    validations:
+      required: true
+  - type: input
+    id: download
+    attributes:
+      label: Public SQLite download URL
+      description: Prefer an asset URL from Releases in your own repository; provide a URL that works without authentication.
+      placeholder: "https://github.com/USER/REPO/releases/download/network-v1/association.sqlite3"
+    validations:
+      required: true
+  - type: input
+    id: sha256
+    attributes:
+      label: SHA-256 checksum of the published file
+      placeholder: "64 hexadecimal characters"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Compatible FLIN release, commit or fork URL
+      placeholder: "Official FLIN @ commit / Your fork version"
+    validations:
+      required: true
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Import compatibility
+      options:
+        - Tested with official mathematics-specific FLIN
+        - Requires a named modified FLIN fork
+        - Not tested / uncertain
+    validations:
+      required: true
+  - type: input
+    id: stats
+    attributes:
+      label: Network statistics
+      description: If known, provide literature units/edges and associative memory units/directed links.
+      placeholder: "abc_units=...; abc_edges=...; units=...; edges=..."
+    validations:
+      required: false
+  - type: textarea
+    id: method
+    attributes:
+      label: Sources and reproduction steps
+      description: How was the network produced? Cite relevant source material and settings.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: Known limitations and a suggested experiment
+      description: What should other users test? What is not yet validated?
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: Data license and redistribution permission
+      description: The FLIN code license does not automatically apply to network data.
+      placeholder: "e.g. CC BY 4.0, CC0, author-specific terms"
+    validations:
+      required: true
+  - type: checkboxes
+    id: rights
+    attributes:
+      label: Publication and privacy confirmation
+      options:
+        - label: I have permission to share this data and it does not contain private data, secrets or rights-restricted third-party material.
+          required: true
+        - label: I understand this is a community-shared experimental network, not a scientifically certified or officially reviewed network.
+          required: true

@@ -1,0 +1,22 @@
+title: "[Idea] "
+body:
+  - type: input
+    id: claim
+    attributes:
+      label: Your idea or question
+    validations:
+      required: true
+  - type: textarea
+    id: mechanism
+    attributes:
+      label: Proposed mechanism or reasoning
+      description: Identify existing FLIN assumptions, proposed changes, and testable predictions.
+    validations:
+      required: true
+  - type: textarea
+    id: falsifiability
+    attributes:
+      label: How could we test or falsify it?
+      description: Separately list evidence, conjecture, and possible counterexamples.
+    validations:
+      required: true
