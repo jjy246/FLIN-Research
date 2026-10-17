@@ -7956,81 +7956,142 @@ def flin_dynamics_statistics(events, feedback, d_ref, k_ref, gate='All'):
     return metrics
 
 
-def flin_dynamics_load_xyz(con, run_id, *, render_limit=850, edge_limit=1200):
-    """Static, trace-grounded XYZ; aggregate EVERY run event before render sampling.
+def flin_dynamics_network_shape(con, display_ids=(), *, run_id=None):
+    """Assign a reproducible research-space position to EVERY active memory.
 
-    Analysis runs off the Tk thread. The full set of visits contributes to each
-    observed unit's XYZ; the UI displays only bounded top-visit units. No
-    existing abc_positions rows or original graph weights are modified.
+    A pulse-unvisited memory has no measured propagation/feedback statistics.
+    Such memories receive EXPLICITLY MARKED graph-derived structural proxies:
+    shortest directed depth from observed gate/natural root (X), full positive-
+    weight outgoing entropy (Y), and a dead-end indicator (Z). The latter is
+    *not* a feedback initiation rate. Measured pulse values are substituted
+    ONLY for units actually visited in the selected traced run.
+
+    Snapshot analysis uses the FULL directed graph; the viewport sample is used
+    only when selecting which already-computed coordinates to render. No graph,
+    learning weight, simulation trace or abc_positions row is modified.
     """
+    from collections import deque
     abc_schema(con)
-    run_id=int(run_id)
-    run=con.execute('SELECT query FROM abc_runs WHERE id=?',(run_id,)).fetchone()
-    if run is None:
-        raise ValueError('Simulation run does not exist.')
-    meta=con.execute('''SELECT d_ref,k_ref,graph_units,graph_links FROM flin_dynamics_meta
-                        WHERE run_id=?''',(run_id,)).fetchone()
-    if not meta:
-        return {'legacy':True,'run_id':run_id,
-                'message':'Legacy / Insufficient Trace: this simulation has no measured pulse paths.'}
-    d_ref=max(1,int(meta[0]));k_ref=max(2,int(meta[1]))
-    trace_count=con.execute('SELECT COUNT(*) FROM flin_pulse_trace WHERE run_id=?',
-                            (run_id,)).fetchone()[0]
-    if not trace_count:
-        return {'legacy':True,'run_id':run_id,
-                'message':'Insufficient Trace: no pulse events were stored for this run.'}
-    visited_count=con.execute('''SELECT COUNT(*) FROM (
-        SELECT unit_id FROM flin_pulse_trace WHERE run_id=? GROUP BY unit_id)''',
-        (run_id,)).fetchone()[0]
-    # Every visit is included in SQL aggregates even if the viewport is sampled.
-    results=con.execute('''SELECT unit_id, COUNT(*) AS n, SUM(step_index),
-        SUM(CASE WHEN step_index>? THEN ? ELSE step_index END),
-        SUM(branch_entropy), SUM(eligible_count), SUM(max_exit_probability),
-        SUM(CASE WHEN selected_next_unit IS NOT NULL THEN chosen_probability ELSE 0 END),
-        SUM(CASE WHEN selected_next_unit IS NOT NULL THEN 1 ELSE 0 END),
-        SUM(CASE WHEN terminal_reason='no_eligible_exit' THEN 1 ELSE 0 END),
-        SUM(CASE WHEN terminal_reason='max_steps_guard' THEN 1 ELSE 0 END)
-        FROM flin_pulse_trace WHERE run_id=? GROUP BY unit_id
-        ORDER BY n DESC,unit_id LIMIT ?''',
-        (d_ref,d_ref,run_id,max(10,int(render_limit)))).fetchall()
-    denominator=math.log(k_ref)
-    stats={}
-    for uid,n,depth,clipped,entropy,eligible,max_prob,chosen,chosen_n,feedback,guard in results:
-        n=int(n);entropy=float(entropy or 0.);chosen_n=int(chosen_n or 0)
-        h=entropy/n
-        stats[uid]={'visits':n,'mean_depth':float(depth or 0.)/n,
-             'X':float(clipped or 0.)/(n*d_ref),
-             'mean_entropy':h,'Y':min(1.,max(0.,h/denominator)),
-             'Z':int(feedback or 0)/n,'feedback':int(feedback or 0),
-             'guard':int(guard or 0),
-             'mean_eligible':float(eligible or 0.)/n,
-             'effective_branches':math.exp(h),
-             'max_exit_probability':float(max_prob or 0.)/n,
-             'chosen_probability':(float(chosen or 0.)/chosen_n if chosen_n else None)}
-    ids=list(stats)
-    labels={}
-    for idx in range(0,len(ids),250):
-        batch=ids[idx:idx+250]
-        labels.update(con.execute('SELECT id,label FROM abc_units WHERE id IN ('+
-                     ','.join('?'*len(batch))+')',batch).fetchall())
-    import heapq
-    priority=[];visible=set(ids)
-    for idx in range(0,len(ids),180):
-        batch=ids[idx:idx+180]
-        for src,dst,weight in con.execute('''SELECT e.src,e.dst,e.weight FROM abc_edges e
-                                WHERE e.src IN ('''+','.join('?'*len(batch))+''')
-                                AND e.weight>0''',batch):
-            if dst not in visible or src==dst or not math.isfinite(weight):
-                continue
-            item=(float(weight),str(src),str(dst))
-            if len(priority)<edge_limit:heapq.heappush(priority,item)
-            elif item>priority[0]:heapq.heapreplace(priority,item)
-    edges=[(a,b,w) for w,a,b in sorted(priority,reverse=True)]
-    return {'legacy':False,'run_id':run_id,'query':run[0],
-            'd_ref':d_ref,'k_ref':k_ref,
-            'graph_units':int(meta[2]),'graph_links':int(meta[3]),
-            'trace_count':int(trace_count),'visited_count':int(visited_count),
-            'display_count':len(stats),'stats':stats,'labels':labels,'edges':edges}
+    if run_id is None:
+        record=con.execute('''SELECT r.id FROM abc_runs r
+          JOIN flin_dynamics_meta m ON m.run_id=r.id
+          WHERE EXISTS(SELECT 1 FROM flin_pulse_trace t WHERE t.run_id=r.id)
+          ORDER BY r.id DESC LIMIT 1''').fetchone()
+        run_id=int(record[0]) if record else None
+    meta=(con.execute('SELECT d_ref,k_ref,graph_units,graph_links '
+                      'FROM flin_dynamics_meta WHERE run_id=?',(run_id,)).fetchone()
+          if run_id is not None else None)
+    d_ref=max(1,int(meta[0])) if meta else 32
+    # Iterate the entire active graph once. This is deliberately independent of
+    # the 3D renderer's edge/node budget and happens on a background worker.
+    active=[uid for (uid,) in con.execute("SELECT id FROM abc_units WHERE status='active'")]
+    nodes=set(active)
+    del active
+    outgoing={}
+    indegree=dict.fromkeys(nodes,0)
+    sums={};log_sums={};degree={}
+    links=0
+    for src,dst,weight in con.execute('''SELECT e.src,e.dst,e.weight FROM abc_edges e
+      JOIN abc_units u ON u.id=e.src AND u.status='active'
+      JOIN abc_units v ON v.id=e.dst AND v.status='active'
+      WHERE e.weight>0 AND e.weight<1e100'''):
+        w=float(weight)
+        if not math.isfinite(w) or w<=0:continue
+        outgoing.setdefault(src,[]).append(dst)
+        indegree[dst]+=1
+        sums[src]=sums.get(src,0.)+w
+        log_sums[src]=log_sums.get(src,0.)+w*math.log(w)
+        degree[src]=degree.get(src,0)+1
+        links+=1
+    k_current=max(2,max(degree.values(),default=0))
+    k_ref=max(2,int(meta[1])) if meta else k_current
+    ln_k=math.log(k_ref)
+    gate_ids=[]
+    if run_id is not None:
+        row=con.execute('SELECT result_json FROM abc_runs WHERE id=?',(run_id,)).fetchone()
+        if row:
+            try:
+                result=json.loads(row[0]);gate_ids=[item['id'] for item in result.get('matched',[])
+                     if isinstance(item,dict) and item.get('id') in nodes]
+            except (ValueError,TypeError,KeyError):pass
+    # Natural origins prevent unrelated branches from being arbitrarily placed
+    # relative to one chosen pulse gate. In closed cycles without a graph root,
+    # the lexicographically first unreached memory is a deterministic seed.
+    roots=list(dict.fromkeys(gate_ids+sorted(uid for uid,n in indegree.items() if n==0)))
+    distance={}; queue=deque()
+    def push_root(uid):
+        if uid not in distance:
+            distance[uid]=0;queue.append(uid)
+    for uid in roots:push_root(uid)
+    def traverse():
+        while queue:
+            src=queue.popleft();step=distance[src]+1
+            for dst in outgoing.get(src,()):
+                if dst not in distance:
+                    distance[dst]=step;queue.append(dst)
+    traverse()
+    for uid in sorted(nodes):
+        if uid not in distance:
+            push_root(uid);traverse()
+    # Full-graph source probabilities. These are *potential* branching values;
+    # visited-node Y instead uses the actually eligible exit set per visit.
+    positions={}; stats={}
+    displayed=set(display_ids)
+    for uid in nodes:
+        n=degree.get(uid,0);total=sums.get(uid,0.)
+        entropy=max(0.,math.log(total)-log_sums[uid]/total) if n>=2 and total>0 else 0.
+        d=distance[uid]
+        x=min(d,d_ref)/d_ref
+        y=max(0.,min(1.,entropy/ln_k))
+        z=1. if n==0 else 0.
+        positions[uid]=(x,y,z)
+        if uid in displayed:
+            stats[uid]={'X':x,'Y':y,'Z':z,'visits':0,
+                'mean_depth':None,'structural_depth':d,'mean_entropy':None,
+                'structural_entropy':entropy,'mean_eligible':None,'structural_outdegree':n,
+                'effective_branches':math.exp(entropy),
+                'max_exit_probability':None,'chosen_probability':None,
+                'feedback':None,'guard':None,'source':'structural_estimate',
+                'z_definition':'Directed dead-end indicator, NOT observed feedback rate'}
+    # Merge measured values from every stored visit; no LIMIT or UI sampling.
+    observed=0;visits=0
+    if run_id is not None:
+        rows=con.execute('''SELECT unit_id,COUNT(*),SUM(step_index),
+            SUM(CASE WHEN step_index>? THEN ? ELSE step_index END),
+            SUM(branch_entropy),SUM(eligible_count),SUM(max_exit_probability),
+            SUM(CASE WHEN selected_next_unit IS NOT NULL THEN chosen_probability ELSE 0 END),
+            SUM(CASE WHEN selected_next_unit IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN terminal_reason='no_eligible_exit' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN terminal_reason='max_steps_guard' THEN 1 ELSE 0 END)
+            FROM flin_pulse_trace WHERE run_id=? GROUP BY unit_id''',(d_ref,d_ref,run_id))
+        for uid,n,depth,clipped,ent,eligible,maxprob,chosen,chosen_n,fb,guard in rows:
+            if uid not in nodes:continue
+            n=int(n);observed+=1;visits+=n
+            h=float(ent or 0.)/n
+            x=float(clipped or 0.)/(n*d_ref)
+            y=min(1.,max(0.,h/ln_k))
+            z=int(fb or 0)/n
+            positions[uid]=(x,y,z)
+            if uid in displayed:
+                stats[uid]={'X':x,'Y':y,'Z':z,'visits':n,
+                    'mean_depth':float(depth or 0.)/n,'structural_depth':distance[uid],
+                    'mean_entropy':h,'structural_entropy':None,
+                    'mean_eligible':float(eligible or 0.)/n,
+                    'structural_outdegree':degree.get(uid,0),
+                    'effective_branches':math.exp(h),
+                    'max_exit_probability':float(maxprob or 0.)/n,
+                    'chosen_probability':(float(chosen or 0.)/int(chosen_n) if chosen_n else None),
+                    'feedback':int(fb or 0),'guard':int(guard or 0),
+                    'source':'observed','z_definition':'Observed no_eligible_exit per visit'}
+    # Keep every underlying node in the computed coordinate system, even when
+    # a viewport renders only a bounded sample. Report exact sampling counts.
+    return {'run_id':run_id,'d_ref':d_ref,'k_ref':k_ref,'graph_units':len(nodes),
+            'graph_links':links,'positions':positions,'stats':stats,
+            'visited_count':observed,'trace_count':visits,
+            'estimated_count':len(nodes)-observed,'display_count':len(display_ids),
+            'root_count':len(roots),'full_graph':True,
+            'note':'Structural fallback is NOT a measured run statistic.'}
+
 
 def flin_dynamics_load(con, run_id, *, render_limit=450, edge_limit=300):
     """Read immutable historical trace. Legacy runs are labeled insufficient."""
@@ -11269,8 +11330,8 @@ class NetworkWindow:
                     self.abc_last_association_id=association_id
                     self.abc_activity.set('✓  time-varying Response already save ; reached Threshold Memory Unit:'+str(response['visible_count']))
                     self.abc_show_response(response,association_id)
-                    if hasattr(self,'dynamics_refresh_runs'):
-                        self.dynamics_refresh_runs(select_id=response['run_id'])
+                    if hasattr(self,'_xyz_schedule'):
+                        self._xyz_schedule(force=True,run_id=response['run_id'])
                 elif kind == 'abc_worker_error':
                     self.abc_worker_active=False
                     self.abc_activity.set('✕ FLIN  work Failed :'+msg[:210])
@@ -12754,316 +12815,242 @@ class NetworkWindow:
 
 
 class ABCNetworkWindow(NetworkWindow):
-    """Single-interface FLIN mathematics workspace, no legacy-memory ingestion."""
+    """Original FLIN desktop GUI with direct XYZ mathematical graph positions."""
 
     def _build_ui(self):
-        """Reuse the original 3D canvas; only its XYZ coordinates are replaced."""
+        # Exactly the original desktop interface: no new buttons, playback,
+        # modes, run selectors or duplicate windows.
         super()._build_ui()
-        self._xyz_data = None
-        self._xyz_coords = {}
-        self._xyz_cache = {}
-        self._xyz_request = 0
-        self._xyz_database = str(DB_PATH)
-        self.xyz_run = tk.StringVar(value='')
-        self.xyz_note = tk.StringVar(value=(
-            'No measured coordinates yet. Run a pulse simulation to measure X, Y and Z.'))
-        host = self.flin_graph_host
-        bar = ttk.Frame(host, style='Dark.TFrame', padding=(7, 4))
-        bar.pack(before=self.canvas.get_tk_widget(), fill='x')
-        ttk.Label(bar, text='Association Dynamics Space  ·  Run',
-                  style='Dark.TLabel').pack(side='left', padx=(0, 5))
-        self.xyz_run_picker = ttk.Combobox(bar, textvariable=self.xyz_run,
-                                          width=37, state='readonly')
-        self.xyz_run_picker.pack(side='left', padx=3)
-        self.xyz_run_picker.bind('<<ComboboxSelected>>', lambda _e: self._xyz_load_selected())
-        ttk.Button(bar, text='Refresh', command=self._xyz_manual_refresh,
-                   style='Dark.TButton').pack(side='left', padx=3)
-        ttk.Button(bar, text='XYZ Metrics', command=self._xyz_metrics_dialog,
-                   style='Dark.TButton').pack(side='left', padx=3)
-        ttk.Button(bar, text='Reset Camera', command=self.reset_camera,
-                   style='Dark.TButton').pack(side='left', padx=3)
-        ttk.Label(host, textvariable=self.xyz_note, style='Dark.TLabel',
-                  wraplength=920).pack(before=self.canvas.get_tk_widget(),
-                                       side='top', anchor='w', padx=10, pady=(1, 4))
-        self.root.after(350, self.dynamics_refresh_runs)
+        self._xyz_data=None
+        self._xyz_coords={}
+        self._xyz_request=0
+        self._xyz_database=str(DB_PATH)
+        self._xyz_signature=None
+        self._xyz_last_request=0.
+        self._xyz_busy=False
+        self._xyz_pending_force=False
+        self._xyz_pending_run=None
+        self.root.after(350, lambda:self._xyz_schedule(force=True))
 
-    def dynamics_refresh_runs(self, select_id=None):
-        """Choose a source run for fixed XYZ coordinates, without animation."""
-        if not hasattr(self, 'xyz_run_picker'):
+    def _xyz_schedule(self, *, force=False, run_id=None):
+        """Refresh after graph changes, without blocking the Tk event loop."""
+        if not hasattr(self,'_xyz_busy'):return
+        if str(DB_PATH)!=self._xyz_database:
+            self._xyz_database=str(DB_PATH)
+            self._xyz_data=None;self._xyz_coords={}
+            self._xyz_signature=None
+            force=True
+        signature=(str(DB_PATH),tuple(self.plot_data),
+                   int(getattr(self,'_xyz_graph_total',0)),
+                   int(getattr(self,'_xyz_link_total',0)))
+        if not force and signature==self._xyz_signature:return
+        if self._xyz_busy:
+            self._xyz_pending_force=True
+            self._xyz_pending_run=run_id
             return
-        try:
-            with database() as con:
-                rows = con.execute('''SELECT r.id, r.query,
-                      CASE WHEN m.run_id IS NULL THEN 0 ELSE 1 END
-                      FROM abc_runs r LEFT JOIN flin_dynamics_meta m ON m.run_id=r.id
-                      ORDER BY r.id DESC LIMIT 120''').fetchall()
-            values = [f'{rid} | {"Measured" if trace else "Legacy / No XYZ"} | {query[:35]}'
-                      for rid, query, trace in rows]
-            old = self.xyz_run.get()
-            target = next((value for value in values if value.startswith(str(select_id)+' | ')), '') if select_id is not None else ''
-            if not target:
-                target = old if old in values else next((v for v in values if ' | Measured | ' in v), '')
-            if not target and values:
-                target = values[0]
-            self.xyz_run_picker.configure(values=values)
-            self.xyz_run.set(target)
-            if target and (target != old or select_id is not None or self._xyz_data is None):
-                self._xyz_load_selected()
-            elif not target:
-                self._xyz_data = None
-                self._xyz_coords = {}
-                self.xyz_note.set('No simulation runs. Showing original topology; X/Y/Z are Unknown until a traced pulse simulation is saved.')
-                self.draw()
-        except (sqlite3.Error, tk.TclError) as exc:
-            self.xyz_note.set('Unable to list simulation runs: '+str(exc)[:180])
-
-    def _xyz_manual_refresh(self):
-        """Reread run metrics and currently stored links only on user request."""
-        value=self.xyz_run.get().split(' | ',1)[0]
-        if value.isdigit():
-            self._xyz_cache.pop((str(DB_PATH),int(value)),None)
-            self._xyz_load_selected()
-        else:
-            self.dynamics_refresh_runs()
-
-    def _xyz_load_selected(self):
-        """Load aggregation on a worker, never blocking Tk's event loop."""
-        token_text = self.xyz_run.get().split(' | ', 1)[0]
-        if not token_text.isdigit():
-            return
-        self._xyz_request += 1
-        token = self._xyz_request
-        db = str(DB_PATH)
-        run_id = int(token_text)
-        cached = self._xyz_cache.get((db, run_id))
-        if cached is not None:
-            self._xyz_received((token, db, cached))
-            return
-        self.xyz_note.set(f'Computing measured XYZ coordinates for run {run_id}…')
+        # Updating the observer every GUI redraw would compete with SQLite
+        # writers. Throttle expensive full-graph snapshots during learning.
+        if not force and time.monotonic()-self._xyz_last_request<(120.0 if getattr(self,'_xyz_graph_total',0)>100000 else 25.0):return
+        self._xyz_signature=signature
+        self._xyz_last_request=time.monotonic()
+        self._xyz_busy=True
+        self._xyz_request+=1
+        token=self._xyz_request
+        db=str(DB_PATH)
+        display_ids=tuple(self.plot_data)
         def work():
             try:
                 with database(path=db) as con:
-                    data = flin_dynamics_load_xyz(con, run_id)
-                self.events.put(('xyz_ready', (token, db, data)))
-            except Exception as exc:
-                self.events.put(('xyz_error', (token, db, str(exc))))
-        self._start_background_thread(target=work, name='FLIN_XYZ_analysis')
+                    # A single consistent WAL read snapshot: never mix epochs.
+                    con.execute('BEGIN')
+                    data=flin_dynamics_network_shape(con,display_ids,run_id=run_id)
+                    con.rollback()
+                self.events.put(('xyz_ready',(token,db,data)))
+            except Exception as ex:
+                self.events.put(('xyz_error',(token,db,str(ex))))
+        self._start_background_thread(target=work,name='FLIN_Network_Shape')
 
-    def _xyz_received(self, payload):
-        token, db, data = payload
-        if token != self._xyz_request or db != str(DB_PATH):
-            return
-        self._xyz_data = data
-        self._xyz_coords = {uid: np.array((v['X'], v['Y'], v['Z']), dtype=float)
-                            for uid, v in data.get('stats', {}).items()}
-        if not data.get('legacy'):
-            self._xyz_cache[(db, data['run_id'])] = data
-            while len(self._xyz_cache) > 3:
-                self._xyz_cache.pop(next(iter(self._xyz_cache)))
-            self.xyz_note.set(
-                f"Run {data['run_id']} · D_ref={data['d_ref']} · K_ref={data['k_ref']} · "
-                f"{data['display_count']:,}/{data['visited_count']:,} reached memories shown · "
-                f"{data['trace_count']:,} observed visits. "
-                'Unreached memories: Unknown. Links use weights loaded at refresh (not historical weights).')
-        else:
-            self.xyz_note.set(data.get('message', 'Legacy / Insufficient Trace') +
-                              ' · Showing original topology; XYZ unknown. Run a new simulation to measure coordinates.')
+    def _xyz_received(self,payload):
+        token,db,data=payload
+        if token!=self._xyz_request or db!=str(DB_PATH):return
+        self._xyz_busy=False
+        self._xyz_data=data
+        self._xyz_coords=data['positions']
+        self.graph_stats.set(
+            f"FLIN 3D: {len(self.plot_data):,}/{data['graph_units']:,} active memories displayed; "
+            f"XYZ computed for {data['graph_units']:,} · "
+            f"{data['visited_count']:,} measured / {data['estimated_count']:,} structural estimates. "
+            f"D_ref={data['d_ref']}, K_ref={data['k_ref']}.")
         self.draw(preserve_view=False)
+        if self._xyz_pending_force:
+            pending=self._xyz_pending_run
+            self._xyz_pending_force=False
+            self._xyz_pending_run=None
+            self._xyz_schedule(force=True,run_id=pending)
 
-    def _xyz_error(self, payload):
-        token, db, error = payload
-        if token == self._xyz_request and db == str(DB_PATH):
-            self.xyz_note.set('XYZ analysis failed: '+error[:230])
+    def _xyz_error(self,payload):
+        token,db,error=payload
+        if token!=self._xyz_request or db!=str(DB_PATH):return
+        self._xyz_busy=False
+        self._xyz_signature=None
+        self.logline.set('Network-space analysis failed: '+error[:180])
+        if self._xyz_pending_force:
+            pending=self._xyz_pending_run
+            self._xyz_pending_force=False
+            self._xyz_pending_run=None
+            self._xyz_schedule(force=True,run_id=pending)
 
-    def _xyz_metrics_dialog(self):
-        data = self._xyz_data
-        if not data or data.get('legacy'):
-            messagebox.showinfo('XYZ Metrics', 'A traced simulation run is needed to measure X, Y and Z.', parent=self.root)
-            return
-        info = {
-            'run_id': data['run_id'],
-            'reference_depth_D_ref': data['d_ref'],
-            'reference_degree_K_ref': data['k_ref'],
-            'active_units_at_simulation': data['graph_units'],
-            'active_links_at_simulation': data['graph_links'],
-            'trace_visits': data['trace_count'],
-            'reached_memories': data['visited_count'],
-            'displayed_memories': data['display_count'],
-            'displayed_memory_metrics': data['stats'],
-            'limitations': ('No coordinates are imputed for unreached memories. '
-                'Feedback initiation excludes max_steps_guard. Current association '
-                'edges and weights may differ from the simulation-time graph.')}
-        win = tk.Toplevel(self.root)
-        win.title('Association Dynamics Space · Measured XYZ')
-        win.geometry('900x640')
-        box = tk.Text(win, wrap='none', font=('DejaVu Sans Mono', 9))
-        box.pack(fill='both', expand=True)
-        box.insert('1.0', json.dumps(info, ensure_ascii=False, indent=2))
-        box.configure(state='disabled')
-
-    def _xyz_show_memory(self, uid):
-        data = self._xyz_data
-        v = data['stats'][uid]
+    def _xyz_show_memory(self,uid):
+        data=self._xyz_data
+        v=data['stats'][uid]
         with database() as con:
-            node = con.execute('SELECT label, definition FROM abc_units WHERE id=?',
-                               (uid,)).fetchone()
-            incoming = con.execute('''SELECT e.src, e.weight FROM abc_edges e
-                                WHERE e.dst=? ORDER BY e.weight DESC LIMIT 15''',
-                               (uid,)).fetchall()
-            outgoing = con.execute('''SELECT e.dst, e.weight FROM abc_edges e
-                                WHERE e.src=? ORDER BY e.weight DESC LIMIT 15''',
-                               (uid,)).fetchall()
-        lines = [node[0] if node else data['labels'].get(uid,uid), 'ID: '+uid,
-                 '', f"X · Propagation Depth: {v['X']:.6f}",
-                 f"  Raw mean depth: {v['mean_depth']:.3f} steps (D_ref={data['d_ref']})",
-                 f"Y · Branching Entropy: {v['Y']:.6f}",
-                 f"  Raw mean entropy: {v['mean_entropy']:.6f} nats (K_ref={data['k_ref']})",
-                 f"  Mean eligible exits: {v['mean_eligible']:.3f}",
-                 f"  Effective branching count: {v['effective_branches']:.3f}",
-                 f"  Mean maximum exit probability: {v['max_exit_probability']:.5f}",
-                 f"  Mean selected exit probability: {v['chosen_probability']}",
-                 f"Z · Feedback Initiation Rate: {v['Z']:.6f}",
-                 f"  Feedback origins: {v['feedback']} / {v['visits']} visits",
-                 f"  max_steps_guard (excluded): {v['guard']}",
-                 '', 'Incoming directed links (current weights):'] + [
-                    f'  {src} : {weight:.4g}' for src,weight in incoming] + [
-                 '', 'Outgoing directed links (current weights):'] + [
-                    f'  {dst} : {weight:.4g}' for dst,weight in outgoing]
-        if node and node[1]:lines.extend(['','Source-grounded definition:',node[1][:1200]])
+            node=con.execute('SELECT label,definition FROM abc_units WHERE id=?',(uid,)).fetchone()
+            incoming=con.execute('SELECT src,weight FROM abc_edges WHERE dst=? ORDER BY weight DESC LIMIT 12',(uid,)).fetchall()
+            outgoing=con.execute('SELECT dst,weight FROM abc_edges WHERE src=? ORDER BY weight DESC LIMIT 12',(uid,)).fetchall()
+        lines=[node[0] if node else uid, 'ID: '+uid,
+               'Position source: '+('MEASURED pulse events' if v['source']=='observed'
+                    else 'STRUCTURAL ESTIMATE — no recorded pulse visits'),'',
+               f"X — Propagation Depth: {v['X']:.6f}",
+               (f"  Observed mean: {v['mean_depth']:.3f} steps" if v['visits']
+                else f"  Estimated directed distance: {v['structural_depth']} steps"),
+               f"Y — Branching Entropy: {v['Y']:.6f}",
+               (f"  Observed entropy: {v['mean_entropy']:.6f} nats" if v['visits']
+                else f"  Full-outdegree structural entropy: {v['structural_entropy']:.6f} nats"),
+               f"  Effective branches: {v['effective_branches']:.4f}",
+               f"  Structural outgoing links: {v['structural_outdegree']}",
+               f"Z — {'Feedback Initiation Rate' if v['visits'] else 'Structural dead-end indicator'}: {v['Z']:.6f}",
+               (f"  Recorded feedback origins: {v['feedback']} / {v['visits']} visits"
+                if v['visits'] else '  Actual feedback initiation: UNKNOWN (unvisited)'),
+               f"  Safety guard events: {v['guard']}" if v['visits'] else '  Safety guard events: UNKNOWN',
+               f"  Maximum exit probability: {v['max_exit_probability']}" if v['visits'] else
+                    '  Actual eligible-exit probabilities: UNKNOWN',
+               '',f"D_ref={data['d_ref']}; K_ref={data['k_ref']}",
+               'This spatial observation NEVER changes association routing.',
+               '', 'Incoming directed associations (current weights):']
+        lines += [f'  {u}: {w:.4g}' for u,w in incoming]
+        lines += ['', 'Outgoing directed associations (current weights):']
+        lines += [f'  {u}: {w:.4g}' for u,w in outgoing]
+        if node and node[1]:lines += ['','Source-grounded definition:',node[1][:1600]]
         self.detail.configure(state='normal')
         self.detail.delete('1.0','end')
-        self.detail.insert('1.0','\n'.join(lines))
+        self.detail.insert('1.0','\\n'.join(lines))
         self.detail.configure(state='disabled')
-    def draw(self, preserve_view=False):
-        """Static measured XYZ plot on the ORIGINAL FLIN 3D canvas.
 
-        Unknown observations are omitted, never assigned fabricated coordinates.
-        Animation, mode switching and feedback-tree geometry are not involved.
-        """
-        data = getattr(self, '_xyz_data', None)
-        if not data or data.get('legacy'):
-            return super().draw(preserve_view=preserve_view)
-        ax = self.ax
-        old_view = (ax.elev, ax.azim)
-        old_limits = ((ax.get_xlim(), ax.get_ylim(), ax.get_zlim()) if preserve_view else None)
+    def draw(self,preserve_view=False):
+        # All VERTICES in the original current viewport receive their mathematically
+        # determined XYZ. The background worker has computed positions over ALL
+        # active units, not only the originally sampled/reached units.
+        data=getattr(self,'_xyz_data',None)
+        if not data or not self.plot_data:return super().draw(preserve_view=preserve_view)
+        ax=self.ax
+        old_view=(ax.elev,ax.azim)
+        old_limits=(ax.get_xlim(),ax.get_ylim(),ax.get_zlim()) if preserve_view else None
         ax.cla()
         ax.set_facecolor(self.BG)
-        ax.view_init(elev=old_view[0], azim=old_view[1])
-        ax.set_xlabel('X — Propagation Depth', color=self.FG, labelpad=13)
-        ax.set_ylabel('Y — Branching Entropy', color=self.FG, labelpad=13)
-        ax.set_zlabel('Z — Feedback Initiation Rate', color=self.FG, labelpad=13)
-        ax.tick_params(colors=self.MUTED, labelsize=8)
-        for setter in (ax.set_xlim, ax.set_ylim, ax.set_zlim):
-            setter(-.03, 1.03)
-        ax.set_box_aspect((1, 1, 1))
-        coords = self._xyz_coords
-        if coords:
-            strokes = []
-            thickness = []
-            for source, destination, weight in data['edges']:
-                if source in coords and destination in coords:
-                    strokes.append((coords[source], coords[destination]))
-                    thickness.append(.35 + 1.6*min(1., weight/10.))
-            if strokes:
-                ax.add_collection3d(Line3DCollection(
-                    strokes, colors='#678ea6', linewidths=thickness, alpha=.47))
-                arrows = []
-                for a,b,_w in data['edges']:
-                    if a not in coords or b not in coords:
-                        continue
-                    delta = coords[b]-coords[a]
-                    distance = float(np.linalg.norm(delta))
-                    if distance < 1e-9:
-                        continue  # Coincident XYZ means coincident measured behavior.
-                    unit = delta/distance
-                    tangent = np.cross(unit, np.array((0., 0., 1.)))
-                    if np.linalg.norm(tangent) < 1e-9:
-                        tangent = np.cross(unit, np.array((0., 1., 0.)))
-                    tangent /= max(1e-12, float(np.linalg.norm(tangent)))
-                    tip = coords[a] + .84*delta
-                    scale = min(.045, max(.009, distance*.13))
-                    arrows.extend([(tip, tip-scale*unit+.38*scale*tangent),
-                                   (tip, tip-scale*unit-.38*scale*tangent)])
-                if arrows:
-                    ax.add_collection3d(Line3DCollection(
-                        arrows, colors='#b0cbda', linewidths=.7, alpha=.8))
-            ids = list(coords)
-            pts = np.vstack([coords[uid] for uid in ids])
-            sizes = [min(100., 14.+8.*math.log1p(data['stats'][uid]['visits'])) for uid in ids]
-            colors = [('#f2b66a' if data['stats'][uid]['feedback'] else '#56b5d2')
-                      for uid in ids]
-            ax.scatter(pts[:,0], pts[:,1], pts[:,2], s=sizes, c=colors,
-                       edgecolors='none', depthshade=False, alpha=.83)
-            if self.chosen in coords:
-                a=coords[self.chosen]
-                ax.scatter([a[0]], [a[1]], [a[2]], s=220, facecolors='none',
-                           edgecolors='white', linewidths=1.5)
-        ax.set_title('Association Dynamics Space — measured positions · run '+str(data['run_id'])+
-                     '\\nOrange: feedback origin · Blue: other reached units · Static coordinates',
-                     color=self.FG, fontsize=9)
+        ax.view_init(elev=old_view[0],azim=old_view[1])
+        ax.set_xlabel('X — Propagation Depth',color=self.FG,labelpad=10)
+        ax.set_ylabel('Y — Branching Entropy',color=self.FG,labelpad=10)
+        ax.set_zlabel('Z — Feedback Initiation Rate / Dead-end Proxy',color=self.FG,labelpad=10)
+        ax.tick_params(colors=self.MUTED,labelsize=8)
+        ax.set_xlim(-.04,1.04);ax.set_ylim(-.04,1.04);ax.set_zlim(-.04,1.04)
+        ax.set_box_aspect((1,1,1))
+        positions=data['positions']
+        visible=[uid for uid in self.plot_data if uid in positions and uid in data['stats']]
+        if visible:
+            # Use existing viewport edge sample for DISPLAY ONLY. It cannot
+            # change network-wide XYZ calculations, and remains directed.
+            segments=[];widths=[];arrows=[]
+            for src,dst,_kind,weight,_count in self.edges:
+                if src not in self.plot_data or dst not in self.plot_data:continue
+                if src not in positions or dst not in positions:continue
+                a=np.asarray(positions[src]);b=np.asarray(positions[dst])
+                segments.append((a,b));widths.append(.3+min(1.7,math.log1p(max(0.,weight))*.43))
+                if len(arrows)<320:
+                    direction=b-a;length=np.linalg.norm(direction)
+                    if length>1e-5:
+                        u=direction/length
+                        tangent=np.cross(u,np.array([0.,0.,1.]))
+                        if np.linalg.norm(tangent)<1e-7:
+                            tangent=np.cross(u,np.array([0.,1.,0.]))
+                        tangent/=max(1e-12,np.linalg.norm(tangent))
+                        tip=a+.77*direction;size=min(.035,length*.12)
+                        arrows.extend([(tip,tip-size*u+.35*size*tangent),
+                                       (tip,tip-size*u-.35*size*tangent)])
+            if segments:ax.add_collection3d(Line3DCollection(segments,
+                colors='#7297b3',alpha=.32,linewidths=widths))
+            if arrows:ax.add_collection3d(Line3DCollection(arrows,
+                colors='#b5cfe2',alpha=.7,linewidths=.65))
+            ids=visible
+            pts=np.asarray([positions[uid] for uid in ids],dtype=float)
+            measured=[data['stats'][uid]['source']=='observed' for uid in ids]
+            # Orange: actual measured. Muted-blue: derived estimate. Neither
+            # introduces random coordinate jitter or artificial separation.
+            colors=['#f4ba73' if seen else '#68a9cd' for seen in measured]
+            ax.scatter(pts[:,0],pts[:,1],pts[:,2],s=24,c=colors,
+                       depthshade=False,edgecolors='none',alpha=.82)
+            if self.chosen in positions and self.chosen in self.plot_data:
+                x,y,z=positions[self.chosen]
+                ax.scatter([x],[y],[z],s=230,facecolors='none',
+                           edgecolors='white',linewidths=1.6)
+        run_tag=('run '+str(data['run_id']) if data['run_id'] is not None
+                 else 'no traced run')
+        ax.set_title('FLIN · Association Dynamics Space · '+run_tag+'\\n'
+            'Orange: observed XYZ  |  Blue: structural proxy  |  '
+            f'{len(visible):,}/{data["graph_units"]:,} memories rendered',
+            color=self.FG,fontsize=9)
         if old_limits:
-            for limits, setter in zip(old_limits,(ax.set_xlim,ax.set_ylim,ax.set_zlim)):
-                setter(*limits)
+            for values,fn in zip(old_limits,(ax.set_xlim,ax.set_ylim,ax.set_zlim)):
+                fn(*values)
         self.canvas.draw_idle()
 
-    def _nearest(self, event):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super()._nearest(event)
-        if event.inaxes != self.ax or event.x is None or event.y is None or not self._xyz_coords:
-            return None
-        ids = list(self._xyz_coords)
-        coords = np.vstack([self._xyz_coords[uid] for uid in ids])
-        p = proj3d.proj_transform(coords[:,0], coords[:,1], coords[:,2], self.ax.get_proj())
-        screen = self.ax.transData.transform(np.column_stack((p[0],p[1])))
-        distance = np.sum((screen-np.asarray([event.x,event.y]))**2, axis=1)
-        index = int(np.argmin(distance))
-        return ids[index] if distance[index] < 18**2 else None
+    def _nearest(self,event):
+        if not getattr(self,'_xyz_data',None):return super()._nearest(event)
+        if event.inaxes!=self.ax or event.x is None or event.y is None:return None
+        positions=self._xyz_data['positions']
+        ids=[u for u in self.plot_data if u in positions and u in self._xyz_data['stats']]
+        if not ids:return None
+        pts=np.asarray([positions[u] for u in ids],dtype=float)
+        projected=proj3d.proj_transform(pts[:,0],pts[:,1],pts[:,2],self.ax.get_proj())
+        pixels=self.ax.transData.transform(np.column_stack(projected[:2]))
+        sq=np.sum((pixels-np.asarray((event.x,event.y)))**2,axis=1)
+        i=int(np.argmin(sq))
+        return ids[i] if sq[i]<18**2 else None
 
-    def on_click(self, event):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super().on_click(event)
-        if event.button == 1:
-            key = self._nearest(event)
-            if key:
-                self.select(key)
-        # Matplotlib itself handles camera rotation. Measured coordinates
-        # must NEVER be dragged into abc_positions.
+    def on_click(self,event):
+        if not getattr(self,'_xyz_data',None):return super().on_click(event)
+        if event.button==1:
+            match=self._nearest(event)
+            if match:self.select(match)
 
-    def on_drag(self, event):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super().on_drag(event)
+    def on_drag(self,event):
+        if not getattr(self,'_xyz_data',None):return super().on_drag(event)
+        # Observation coordinates are immutable: node dragging is disabled.
 
-    def on_release(self, event):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super().on_release(event)
+    def on_release(self,event):
+        if not getattr(self,'_xyz_data',None):return super().on_release(event)
 
-    def on_scroll(self, event):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super().on_scroll(event)
-        if event.inaxes != self.ax or event.button not in ('up', 'down'):
-            return
-        factor = .82 if event.button == 'up' else 1.22
-        for getter,setter in ((self.ax.get_xlim,self.ax.set_xlim),
-                              (self.ax.get_ylim,self.ax.set_ylim),
-                              (self.ax.get_zlim,self.ax.set_zlim)):
-            lo,hi = getter()
-            mid = (lo+hi)/2
-            half = max(.015,(hi-lo)*.5*factor)
-            setter(mid-half,mid+half)
+    def on_scroll(self,event):
+        if not getattr(self,'_xyz_data',None):return super().on_scroll(event)
+        if event.inaxes!=self.ax or event.button not in ('up','down'):return
+        factor=.82 if event.button=='up' else 1.22
+        for get,set_ in ((self.ax.get_xlim,self.ax.set_xlim),
+                         (self.ax.get_ylim,self.ax.set_ylim),(self.ax.get_zlim,self.ax.set_zlim)):
+            lo,hi=get();mid=(lo+hi)/2;half=max(.015,(hi-lo)*.5*factor)
+            set_(mid-half,mid+half)
         self.canvas.draw_idle()
 
     def reset_camera(self):
-        if not getattr(self, '_xyz_data', None) or self._xyz_data.get('legacy'):
-            return super().reset_camera()
-        self.ax.view_init(elev=24, azim=-65)
+        if not getattr(self,'_xyz_data',None):return super().reset_camera()
+        self.ax.view_init(elev=24,azim=-65)
         self.draw(preserve_view=False)
 
-    def abc_show_graph(self, result=None):
-        """Open the chosen pulse run in the existing static XYZ visualization."""
+    def abc_show_graph(self,result=None):
+        """After pulse simulation, refresh intrinsic network geometry in place."""
         if result and result.get('run_id'):
-            self.dynamics_refresh_runs(select_id=result['run_id'])
+            self._xyz_schedule(force=True,run_id=int(result['run_id']))
         else:
-            self.dynamics_refresh_runs()
+            self._xyz_schedule(force=True)
+
     def __init__(self):
         # Existing users' original graph is never converted, deleted or reused.
         # Switching to an isolated SQLite database also avoids ambiguous totals.
@@ -13115,7 +13102,7 @@ class ABCNetworkWindow(NetworkWindow):
                 for start in range(0,len(ids),160):
                     part=ids[start:start+160]
                     sql=('SELECT id,label,definition,status,evidence_count FROM abc_units '
-                         'WHERE id IN ('+','.join('?' for _ in part)+')')
+                         "WHERE status='active' AND id IN ("+','.join('?' for _ in part)+')')
                     for uid,label,definition,status,evidence in con.execute(sql,part):
                         selected[uid]={'label':label,
                             'kind':'concept' if status=='active' else 'candidate',
@@ -13123,19 +13110,16 @@ class ABCNetworkWindow(NetworkWindow):
                             'citations':0,'support':evidence}
             else:
                 # Prioritize active associative memories, then candidates.
-                active_cap=int(limit*.79)
+                active_cap=limit
                 for uid,label,definition,status,evidence in con.execute(
                       'SELECT id,label,definition,status,evidence_count FROM abc_units '
                       "WHERE status='active' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
                       (active_cap,)):
                     selected[uid]=dict(label=label,kind='concept',description=definition,
                         url='',citations=0,support=evidence)
-                for uid,label,definition,status,evidence in con.execute(
-                      'SELECT id,label,definition,status,evidence_count FROM abc_units '
-                      "WHERE status='candidate' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
-                      (limit-len(selected),)):
-                    selected[uid]=dict(label=label,kind='candidate',description=definition,
-                        url='',citations=0,support=evidence)
+                # Only triggerable (active) memories have FLIN association-space
+                # coordinates. Legacy candidates remain in SQLite and other UI
+                # reports; they are not graph members for pulse propagation.
                 if len(selected)<limit:
                     for uid,label,definition,status,evidence in con.execute(
                           'SELECT id,label,definition,status,evidence_count FROM abc_units '
@@ -13160,12 +13144,12 @@ class ABCNetworkWindow(NetworkWindow):
 
     def reload_network(self):
         # Observations are scoped to the SQLite network from which they came.
-        if hasattr(self,'xyz_run_picker') and getattr(self,'_xyz_database',None)!=str(DB_PATH):
+        if hasattr(self,'_xyz_database') and self._xyz_database!=str(DB_PATH):
             self._xyz_database=str(DB_PATH)
             self._xyz_request+=1
+            self._xyz_busy=False
             self._xyz_data=None;self._xyz_coords={}
-            self.xyz_run.set('')
-            self.root.after(50,self.dynamics_refresh_runs)
+            self._xyz_signature=None
         try:
             previous=set(self.plot_data)
             nodes,edges,totals,all_nodes=self.get_network()
@@ -13192,14 +13176,21 @@ class ABCNetworkWindow(NetworkWindow):
                     for uid,x,y,z in con.execute(sql,part):
                         pos=np.asarray([x,y,z],dtype=float)
                         if np.all(np.isfinite(pos)):self.coords[uid]=pos
-            self._layout(nodes,edges)
+            if not getattr(self,'_xyz_data',None):
+                self._layout(nodes,edges)
+            self._xyz_graph_total=status['active']
+            self._xyz_link_total=status['edges']
             self.draw(preserve_view=bool(nodes) and previous==set(nodes))
             self.refresh_theory_states()
+            self._xyz_schedule()
         except Exception as exc:
             self.append_log('FLIN 3D rendering error: '+str(exc)[:250])
             self.logline.set('FLIN plot refresh failed: '+str(exc)[:150])
 
     def persist_positions(self,keys=None):
+        # XYZ is a derived observation, not a user-editable free layout.
+        # Preserve legacy abc_positions exactly after a shape is computed.
+        if getattr(self,'_xyz_data',None):return
         subset=keys or list(self.coords)
         with database() as con:
             with con:
@@ -13209,20 +13200,9 @@ class ABCNetworkWindow(NetworkWindow):
                     for k in subset if k in self.coords])
 
     def select(self,key,repaint=True):
-        if getattr(self, '_xyz_data', None) and not self._xyz_data.get('legacy'):
+        if getattr(self,'_xyz_data',None) and key in self._xyz_data['stats']:
             self.chosen=key
-            if key in self._xyz_coords:
-                self._xyz_show_memory(key)
-            elif key in self.plot_data:
-                self.detail.configure(state='normal')
-                self.detail.delete('1.0','end')
-                self.detail.insert('1.0', self.plot_data[key]['label'] + '\n' +
-                    'Run '+str(self._xyz_data['run_id'])+' — Unreached / Unknown.\n' +
-                    'No observed pulse visits; X, Y and Z cannot be estimated.\n' +
-                    'This memory remains part of the underlying FLIN network.')
-                self.detail.configure(state='disabled')
-            else:
-                return
+            self._xyz_show_memory(key)
             if repaint:self.draw(preserve_view=True)
             return
         if key not in self.plot_data:return
