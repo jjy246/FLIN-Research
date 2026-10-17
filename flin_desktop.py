@@ -1759,6 +1759,23 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
                         report('Backing up SQLite database pages', total-remaining, total)
                     src.backup(dst, pages=512, progress=on_backup, sleep=0.05)
             _export_checkpoint(stop_event)
+            # The source database uses WAL. A copied WAL-mode database may spawn
+            # -wal/-shm sidecars when opened for verification. Convert ONLY the
+            # exported snapshot to DELETE journal mode so association.sqlite3 is
+            # independently portable as a single file. Do not touch the live DB.
+            report('Finalizing portable standalone SQLite snapshot', 0, 0)
+            with contextlib.closing(sqlite3.connect(str(snapshot), timeout=30)) as exported:
+                exported.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+                journal_mode = exported.execute('PRAGMA journal_mode=DELETE').fetchone()[0]
+                if journal_mode.lower() != 'delete':
+                    raise RuntimeError('Failed to finalize standalone SQLite snapshot: ' + str(journal_mode))
+            for extension in ('-wal', '-shm'):
+                sidecar = Path(str(snapshot) + extension)
+                if sidecar.exists():
+                    if extension == '-wal' and sidecar.stat().st_size != 0:
+                        raise RuntimeError('Exported SQLite WAL is not empty after finalization; aborting export.')
+                    sidecar.unlink()
+            _export_checkpoint(stop_event)
             # Verify the *exported snapshot*, not a concurrently changing live DB.
             with contextlib.closing(sqlite3.connect(snapshot.as_uri() + '?mode=ro',
                                                     uri=True)) as snapshot_con:
@@ -10612,7 +10629,12 @@ class NetworkWindow:
         if status=='paused' and set_id not in self.generating_sets and set_id not in self.iteration_jobs:
             self.question_model_activity(set_id,False,'Model: already pause | progress retain in  SQLite')
         state['published']=published
-        state['export_btn'].configure(state='normal' if published else 'disabled')
+        # A disabled Export button looks broken. Keep it clickable so the
+        # handler can explain exactly which reviews are still missing.
+        state['export_btn'].configure(state='normal')
+        state['export_btn'].configure(text=(
+            '⇧  Export reviewed questions (JSON + TXT)' if published else
+            f'⇧  Export reviewed questions (waiting: {reviewed}/{target_count} reviewed)'))
         table=state['table']
         selected=(table.selection() or [None])[0]
         for old in table.get_children():table.delete(old)
@@ -10645,23 +10667,67 @@ class NetworkWindow:
             self.show_question_detail(set_id)
 
     def save_final_questions(self,set_id):
-        """Export only the already published, evaluated final versions."""
+        """Export published, machine-reviewed questions with visible feedback."""
         state=self.question_windows.get(set_id)
-        if not state or not state['win'].winfo_exists():return
-        if not state.get('published',False):
-            messagebox.showwarning('Review Not Complete',
-                ' Complete all requested questionsReviewand Revision , then Export final version .',parent=state['win'])
+        if not state or not state['win'].winfo_exists():
             return
+        # Always read the number of requested questions from SQLite.  A GUI
+        # window can outlive a resumed job, and no late success callback may
+        # reference a variable local to an earlier generation/review stage.
         try:
-            json_path,txt_path=export_final_question_set(set_id)
+            target_count=get_question_count(set_id)
+            pipeline_status=question_pipeline_status(set_id)
+            drafted,reviewed=question_pipeline_counts(set_id)
         except Exception as exc:
-            messagebox.showerror('Failed to Export Final Questions',str(exc),parent=state['win'])
+            state['status'].set('Export validation failed: '+str(exc)[:180])
+            messagebox.showerror('Export Check Failed',str(exc),parent=state['win'])
             return
-        state['status'].set(f'✓ Exported {target_count} final questions: '+str(json_path.parent))
+        state['question_count']=target_count
+        if pipeline_status!='ready' or drafted!=target_count or reviewed!=target_count:
+            messagebox.showwarning('Review Not Complete',
+                f'Question set #{set_id} is not yet ready for final export.\n\n'
+                f'Generated questions: {drafted}/{target_count}\n'
+                f'Reviewed questions: {reviewed}/{target_count}\n'
+                f'Pipeline status: {pipeline_status}\n\n'
+                'Finish or resume the remaining reviews before exporting final questions.',
+                parent=state['win'])
+            return
+        # The application may be installed in a read-only folder, so do not
+        # silently try writing into the source-code directory.
+        initial=Path.home()/'Documents'
+        if not initial.is_dir():
+            initial=Path.home()
+        folder=filedialog.askdirectory(parent=state['win'],
+            title='Choose destination for reviewed FLIN questions',
+            initialdir=str(initial),mustexist=True)
+        if not folder:
+            state['status'].set('Export cancelled: no destination folder selected.')
+            return
+        state['status'].set(f'Exporting {target_count} reviewed questions...')
+        state['win'].update_idletasks()
+        try:
+            json_path,txt_path=export_final_question_set(set_id,base_dir=folder)
+            if not json_path.is_file() or not txt_path.is_file():
+                raise RuntimeError('Export returned paths but one or more output files are missing.')
+            # Confirm that the delivered files contain the whole reviewed set,
+            # not just that their filenames were successfully created.
+            with json_path.open('r',encoding='utf-8') as exported_file:
+                manifest=json.load(exported_file)
+            if (manifest.get('question_count')!=target_count or
+                    len(manifest.get('questions',[]))!=target_count or
+                    not txt_path.stat().st_size):
+                raise RuntimeError('Export verification failed: reviewed question count differs from SQLite.')
+        except Exception as exc:
+            state['status'].set('Export failed: '+str(exc)[:180])
+            messagebox.showerror('Failed to Export Final Questions',
+                f'{type(exc).__name__}: {exc}',parent=state['win'])
+            return
+        state['status'].set(f'✓ Exported {target_count} reviewed questions to {json_path.parent}')
         messagebox.showinfo('Export Complete',
-            f'Exported {target_count} reviewed questions:\n\n'
-            f'JSON：{json_path.name}\nTXT：{txt_path.name}\n\n'
-            f' Position :{json_path.parent}',parent=state['win'])
+            f'Exported {target_count} reviewed questions.\n\n'
+            f'JSON: {json_path.name}\nTXT: {txt_path.name}\n\n'
+            f'Saved in: {json_path.parent}',parent=state['win'])
+
 
     def show_question_detail(self,set_id):
         state=self.question_windows.get(set_id)
