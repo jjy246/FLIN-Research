@@ -6569,6 +6569,102 @@ QUESTION_RUBRIC = {
     'evidence': ' citation Source , Candidate relationship and discussion Evidence is whether Traceable (0-20)',
     'depth': ' question research depth , nontriviality and actual value value (0-20)',
 }
+# Research topics are taken from the USER'S original query, never inferred
+# from whichever memory units happen to have the strongest pulse response.
+def requested_question_topics(context):
+    raw=str(context.get('query','') or '').strip()
+    parts=[v.strip().strip('\"\' ') for v in re.split(r'[,，、;；\n]+',raw)]
+    return list(dict.fromkeys(v for v in parts if v))[:8]
+
+
+def _topic_alignment_pass(report, required):
+    if not required:
+        return True
+    if not isinstance(report,dict):
+        return False
+    found={canonical_phrase(x.get('topic','')): x
+           for x in report.get('coverage',[]) if isinstance(x,dict)}
+    return (all(found.get(canonical_phrase(t),{}).get('present') is True and
+                len(str(found[canonical_phrase(t)].get('role','')).strip())>=8
+                for t in required) and int(report.get('linkage_score') or 0)>=
+            (12 if len(required)>1 else 10))
+
+
+def _topic_alignment_missing(report, required):
+    if not required:return []
+    found={canonical_phrase(x.get('topic','')):x
+           for x in report.get('coverage',[]) if isinstance(x,dict)} if isinstance(report,dict) else {}
+    return [t for t in required if not (found.get(canonical_phrase(t),{}).get('present') is True
+               and len(str(found[canonical_phrase(t)].get('role','')).strip())>=8)]
+
+
+TOPIC_ALIGNMENT_SCHEMA = {
+    'type':'object', 'properties':{
+        'coverage':{'type':'array','items':{'type':'object','properties':{
+            'topic':{'type':'string'},'present':{'type':'boolean'},'role':{'type':'string'}},
+            'required':['topic','present','role']}},
+        'linkage_score':{'type':'integer'}, 'linkage':{'type':'string'}, 'issues':{'type':'string'}},
+    'required':['coverage','linkage_score','linkage','issues']}
+
+
+def evaluate_question_topic_alignment(model, question, context, *,
+                                      progress=None, cancel_event=None):
+    '''Focused second-model call: each requested subject must contribute real math.
+
+    A domain name merely appearing in the title is not substantive coverage.
+    This report is an LLM assessment, NOT independently established validity.
+    '''
+    required=requested_question_topics(context)
+    if not required:
+        return {'coverage':[], 'linkage_score':20, 'linkage':'No explicit topics',
+                'issues':'', 'passed':True, 'missing':[]}
+    core={key:str(question.get(key,'') or '')[:350] for key in
+          ('title','formal_objects','assumptions','question')}
+    prompt=(
+        'You are an independent mathematical TOPIC ALIGNMENT reviewer. '
+        'User explicitly requested these subjects: '+json.dumps(required,ensure_ascii=False)+'. '
+        'For EACH subject, return one entry with the EXACT topic text, boolean present, '
+        'and a concise role (8-35 words) explaining which defined mathematical object or '
+        'operation it contributes. present=false if it is absent, name-dropped, or a mere analogy. '
+        'For FINANCE, require a financial quantity/model such as asset returns, portfolio '
+        'weights/risk, pricing, or hedging, not just a generic gradient. '
+        'For multiple subjects, check a meaningful INTERACTION (shared variables, '
+        'assumptions, equations, or explicit mapping); co-occurrence alone scores 0. '
+        'For one subject, assess mathematical relevance rather than cross-field linkage. '
+        'Give linkage_score 0..20 (12+ only for substantive multi-topic linkage, '
+        'or single-topic mathematical relevance), linkage <= 35 words, issues <= 30 words. '
+        'Do not invent subject roles or claim a connection without a defined mapping. '
+        'Return ONLY JSON following the schema.\nQuestion: '+
+        json.dumps(core,ensure_ascii=False,separators=(',',':')))
+    if progress:progress('Independent topic-alignment review: '+', '.join(required))
+    obj=ollama_json(model,prompt,num_predict=650,
+        timeout=max(90,min(900,int(os.environ.get('BRAIN_TOPIC_REVIEW_TIMEOUT','210')))),
+        response_schema=TOPIC_ALIGNMENT_SCHEMA,think=False,
+        progress=progress,cancel_event=cancel_event)
+    raw=obj.get('coverage',[]) if isinstance(obj,dict) else []
+    records=[];seen=set()
+    for entry in raw if isinstance(raw,list) else []:
+        if not isinstance(entry,dict):continue
+        key=canonical_phrase(entry.get('topic',''))
+        matched=next((t for t in required if canonical_phrase(t)==key),None)
+        if matched is None or key in seen:continue
+        seen.add(key)
+        role=str(entry.get('role','') or '').strip()[:230]
+        records.append({'topic':matched,'present':entry.get('present') is True
+                        and len(role)>=8,'role':role})
+    # Explicitly include every subject that the model omitted from its reply.
+    for t in required:
+        if canonical_phrase(t) not in seen:
+            records.append({'topic':t,'present':False,'role':'Not assessed by model'})
+    score=max(0,min(20,int(obj.get('linkage_score') or 0)))
+    report={'coverage':records,'linkage_score':score,
+            'linkage':str(obj.get('linkage','') or '')[:240],
+            'issues':str(obj.get('issues','') or '')[:210]}
+    report['missing']=_topic_alignment_missing(report,required)
+    report['passed']=_topic_alignment_pass(report,required)
+    return report
+
+
 def normalized_ollama_model(name):
     """Normalize UI legacyModelnames to the new 4 GB VRAM-friendly model."""
     name=(name or DEFAULT_OLLAMA_MODEL).strip().casefold()
@@ -7138,17 +7234,20 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
     allowed=({str(r.get('ref','')) for r in context_data['claims']} |
              {str(r.get('ref','')) for r in context_data['source_quotes']})- {''}
     taken={str(x).casefold().strip() for x in existing_titles}
-    query_topics=list(dict.fromkeys(str(x.get('input') or x.get('label') or '')[:65]
-                                     for x in context.get('matched',[])[:20]))
-    query_topics=[x for x in query_topics if x]
+    query_topics=requested_question_topics(context)
     slot_number=int(slot_number) if slot_number is not None else len(existing_titles)+1
     focus=''
     if len(query_topics)>=2:
-        first=query_topics[(slot_number-1)%len(query_topics)]
-        second=query_topics[slot_number%len(query_topics)]
-        focus=(f'For question {slot_number}, first examine whether "{first}" and "{second}" share a mathematical structure. '
-               'Claim that a valid mathematical mapping exists only if the supplied evidence supports it. '
-               'Otherwise formulate a rigorous, nontrivial question within one field rather than forcing a connection. ')
+        focus=('The user REQUIRED the following subjects: '+
+               json.dumps(query_topics,ensure_ascii=False)+'. EACH question must substantively '
+               'integrate ALL these requested subjects through a precise shared mathematical '
+               'model or explicitly defined mapping. Each subject must contribute a variable, '
+               'constraint, equation, or mathematical objective—not just a keyword. '
+               'For finance include a defined financial object (e.g. portfolio weights, '
+               'asset returns, risk, hedging or pricing). Make assumptions under which the '
+               'cross-field connection is valid. If the supplied memory evidence lacks '
+               'the connection, formulate a TESTABLE hypothesis and disclose the evidence gap; '
+               'never fabricate a proven result or citation. ')
     single=(count==1)
     if single:
         format_instruction=(
@@ -7420,6 +7519,7 @@ def judge_question(model, question, context, *, prior_question=None,
         'You are a rigorous cross-disciplinary mathematical reviewer. Do not inflate scores to reward effort. '
         'Score each rubric category from 0 to 20: formal objects and notation, assumptions, '
         'provability or falsifiability, traceable evidence, and mathematical depth. '
+        'Topic alignment is audited separately and contributes up to 20 points to the final score. '
         'Reduce the depth score for a mere restatement of a known result and reduce the evidence score for unsupported claims. '
         'Check definitions, notation, quantifiers, necessary and sufficient assumptions, prior results, '
         'feasible proofs or counterexamples, and the validity of proposed cross-field mappings. '
@@ -7440,20 +7540,34 @@ def judge_question(model, question, context, *, prior_question=None,
         try:score=round(float(raw.get(key,0)))
         except (ValueError,TypeError):score=0
         grades[key]=max(0,min(20,int(score)))
-    score=sum(grades.values())
+    required_topics=requested_question_topics(context)
+    alignment=evaluate_question_topic_alignment(model,question,context,
+                    progress=progress,cancel_event=cancel_event)
     if not question.get('evidence_ids'):
         grades['evidence']=0
-        score=min(60,sum(grades.values()))
+    # Five original criteria each retain their 0..20 raw grade. Scale their
+    # 100 possible points to 80, plus 0..20 for substantive topic linkage.
+    grades['topic_linkage']=int(alignment['linkage_score'])
+    score=round(0.8*sum(grades[k] for k in QUESTION_RUBRIC)+grades['topic_linkage'])
+    if not question.get('evidence_ids'):
+        score=min(score,60)
     if obj.get('verifiable') is not True:
         score=min(score,70)
-    review={'rubric':grades,'score':score,
-            'critique':str(obj.get('critique',''))[:380],
+    if not alignment['passed']:
+        score=min(score,49)  # Reject topic drift even when math is elegant.
+    topic_issue=('Missing substantive subjects: '+', '.join(alignment['missing'])
+                 if alignment['missing'] else 'Insufficient cross-topic mathematical linkage.')
+    model_critique=str(obj.get('critique',''))[:250]
+    if not alignment['passed']:
+        model_critique=(topic_issue+' '+alignment['issues']+' '+model_critique).strip()[:380]
+    review={'rubric':grades,'score':score,'topic_alignment':alignment,
+            'critique':model_critique,
             'verifiable':obj.get('verifiable') is True}
     if prior_question is not None:
         review['difference']=_validated_delta(obj,structural)
-        if not review['verifiable']:
+        if not review['verifiable'] or not alignment['passed']:
             review['difference']['accepted']=False
-            review['difference']['reason']+='; this version proposition still Unable to clear confirm Validate '
+            review['difference']['reason']+='; verifiability or required-topic linkage not established '
     return review
 
 
@@ -7588,6 +7702,18 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
     old_core={key:_question_text(old.get(key,''))[:340 if key=='question' else 220]
               for key in ('formal_objects','assumptions','question')}
     critique_text=str(critique or assessment.get('critique') or '')[:260]
+    required_topics=requested_question_topics(context)
+    alignment=assessment.get('topic_alignment') or {}
+    missing=list(alignment.get('missing') or [])
+    topic_repair=(
+        'MANDATORY topic repair: all user subjects '+
+        json.dumps(required_topics,ensure_ascii=False)+
+        ' must contribute mathematically. Missing: '+
+        json.dumps(missing,ensure_ascii=False)+
+        '. Create an actual cross-field equation, variable or constrained model; '
+        'for finance explicitly define a portfolio/asset/pricing/risk quantity. '
+        'Do not just mention the field names. '
+        if len(required_topics)>=2 else '')
     evidence=compact_question_evidence(context, [], max_chars=460)
     evidence['claims']=evidence.get('claims',[])[:2]
     prompt=(
@@ -7601,6 +7727,7 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
         'field, at most 45 words. Otherwise omit unchanged fields. '
         '\nCurrent proposition: '+json.dumps(old_core,ensure_ascii=False,separators=(',',':'))+
         '\nCorrect these issues: '+critique_text+
+        '\n'+topic_repair+
         '\nSource hints (NOT proofs): '+json.dumps(evidence,ensure_ascii=False,separators=(',',':'))
     )
     last_error=None
@@ -7617,7 +7744,7 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
                 'proposition","assumptions":"changed conditions if needed"}. '
                 'Question 25-65 words, retain necessary mathematical definitions. '
                 '\nPrevious: '+json.dumps(old_core,ensure_ascii=False,separators=(',',':'))+
-                '\nFix: '+critique_text[:190]
+                '\nFix: '+critique_text[:190]+'\n'+topic_repair[:490]
             )
         else:
             request=prompt
@@ -7773,6 +7900,15 @@ def export_final_question_set(set_id, base_dir=None):
             if feedback is None:
                 raise ValueError(f' #  {slot}  questions missingModelreview score , Unable to Export .')
             score,comment,rubric_json,reviewer,reviewed_at=feedback
+            topicrow=con.execute('''SELECT score,rubric_json FROM question_feedback
+                WHERE candidate_id=? AND role='topic_alignment'
+                ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
+            # Pre-upgrade READY sets did not run a dedicated topic review.
+            # Preserve their exportability but explicitly mark the audit missing.
+            if topicrow is not None and topicrow[0]!=1:
+                raise ValueError(f'Question {slot}: required topics failed alignment review.')
+            try: topic_report=json.loads(topicrow[1]) if topicrow else None
+            except (TypeError,ValueError): topic_report=None
             problem=json.loads(content_json)
             if not isinstance(problem,dict) or not all(
                     str(problem.get(k,'')).strip() for k in ('title','formal_objects','question')):
@@ -7788,6 +7924,9 @@ def export_final_question_set(set_id, base_dir=None):
                 'number':slot,'candidate_id':cid,'version':version,
                 'generator_model':model,'version_created_at':version_created,
                 'problem':problem,'revision_comparison':comparison,
+                'topic_alignment':topic_report,
+                'topic_alignment_status':('Passed model review' if topicrow else
+                    'Legacy / Not assessed'),
                 'review':{'score':score,'max_score':100,'model':reviewer,
                           'comment':comment,'rubric':rubric,'reviewed_at':reviewed_at},
             })
@@ -7800,7 +7939,9 @@ def export_final_question_set(set_id, base_dir=None):
         'question_set_created_at':created,'review_round_limit':round_limit,
         'requested_question_count':question_count,
         'exported_at_utc':exported_at,
-        'note':'Model ratings are heuristic assessments, not independent scientific verification.',
+        'note':('Model ratings and topic alignment are model judgments, not independent '
+                'mathematical verification or novelty assessment. Existing legacy questions '
+                'may predate topic-alignment review.'),
         'question_count':len(questions),'questions':questions,
     }
 
@@ -7830,6 +7971,8 @@ def export_final_question_set(set_id, base_dir=None):
             text_lines.append(f'{caption}: {display(problem.get(key))}')
         review=item['review']
         text_lines.extend([f"Model score: {review['score']}/100",
+             f"Topic alignment: {item['topic_alignment_status']}",
+             f"Topic roles and linkage: {display(item['topic_alignment'])}",
              f"Review model: {review['model']}",
              f"Model comments: {display(review['comment'])}",
              f"Rubric scores: {display(review['rubric'])}",
@@ -10962,6 +11105,13 @@ class NetworkWindow:
                         with con:
                             save_feedback(con,cid,'evaluator',verdict['score'],
                                           verdict['critique'],verdict['rubric'],used)
+                            if 'topic_alignment' in verdict:
+                                alignment=verdict['topic_alignment']
+                                save_feedback(con,cid,'topic_alignment',
+                                    1 if alignment.get('passed') else 0,
+                                    ('Missing: '+', '.join(alignment.get('missing',[]))+
+                                     '; '+alignment.get('linkage',''))[:500],
+                                    alignment,used)
                             if 'difference' in verdict:
                                 delta=verdict['difference']
                                 save_feedback(con,cid,'difference',
@@ -11000,11 +11150,15 @@ class NetworkWindow:
                             diff=con.execute('''SELECT rubric_json FROM question_feedback
                                 WHERE candidate_id=? AND role='difference'
                                 ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
-                        if prior and (previous_question is None or diff is not None):
+                            topic_record=con.execute('''SELECT rubric_json FROM question_feedback
+                                WHERE candidate_id=? AND role='topic_alignment'
+                                ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
+                        if prior and topic_record and (previous_question is None or diff is not None):
                             try:rubric=json.loads(prior[2] or '{}')
                             except (TypeError,ValueError):rubric={}
                             verdict={'score':int(prior[0]),
-                                     'critique':str(prior[1] or ''),'rubric':rubric}
+                                     'critique':str(prior[1] or ''),'rubric':rubric,
+                                     'topic_alignment':json.loads(topic_record[0] or '{}')}
                             if diff:
                                 try:verdict['difference']=json.loads(diff[0])
                                 except (TypeError,ValueError):pass
@@ -11101,6 +11255,9 @@ class NetworkWindow:
                             FROM question_candidates q JOIN question_feedback f
                             ON f.candidate_id=q.id
                             WHERE q.set_id=? AND q.slot=? AND f.role='evaluator'
+                            AND EXISTS (SELECT 1 FROM question_feedback ta
+                                WHERE ta.candidate_id=q.id AND ta.role='topic_alignment'
+                                AND ta.score=1)
                             AND (q.version=1 OR EXISTS (
                                 SELECT 1 FROM question_feedback d
                                 WHERE d.candidate_id=q.id AND d.role='difference'
@@ -11108,7 +11265,10 @@ class NetworkWindow:
                             GROUP BY q.id ORDER BY best_score DESC,q.version ASC LIMIT 1''',
                             (set_id,slot)).fetchone()
                         if not best:
-                            raise RuntimeError(f'Lane {slot}: no evaluated, acceptable candidate')
+                            raise RuntimeError(
+                                f'Question {slot}: no version passes ALL requested topics '
+                                'and substantive mathematical linkage. Saved drafts remain; '
+                                'increase review rounds or start a new question set.')
                         with con:
                             con.execute('UPDATE question_candidates SET current=0 '
                                         'WHERE set_id=? AND slot=?',(set_id,slot))
