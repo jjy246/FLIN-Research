@@ -83,122 +83,378 @@ else:
 APP_TITLE = "FLIN — Feature-Link Intellegence Network | Efficiency-Aware v19.0"
 
 
-def detect_cpu_resources():
-    """Detect usable logical CPUs, respecting Linux affinity and CPU quota."""
-    logical = max(1, os.cpu_count() or 1)
+def _flin_linux_cgroup_resources():
+    """Find effective cgroup v1/v2 quotas without changing scheduler settings.
+
+    Nested container limits may be tighter than the leaf cgroup. /proc/self/cgroup
+    resolves the effective hierarchy; malformed or unreadable files are ignored.
+    """
+    if not sys.platform.startswith('linux'):
+        return None, None
+    cpu_limits, memory_limits = [], []
+    paths = {'unified': '/', 'cpu': '/', 'memory': '/'}
     try:
-        affinity = sorted(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        affinity = list(range(logical))
-    if not affinity:
-        affinity = list(range(logical))
-    quota_cpus = None
-    try:
-        raw = Path('/sys/fs/cgroup/cpu.max').read_text().split()
-        if len(raw) >= 2 and raw[0] != 'max':
-            quota, period = int(raw[0]), int(raw[1])
-            if quota > 0 and period > 0:
-                quota_cpus = max(1, quota // period)
-    except (OSError, ValueError):
+        for line in Path('/proc/self/cgroup').read_text().splitlines():
+            parts = line.split(':', 2)
+            if len(parts) != 3:
+                continue
+            hierarchy, controllers, path = parts
+            if hierarchy == '0' and not controllers:
+                paths['unified'] = path
+            for controller in controllers.split(','):
+                if controller in ('cpu', 'memory'):
+                    paths[controller] = path
+    except OSError:
         pass
-    if quota_cpus is None:
+
+    def walk(base, group):
+        # Avoid path traversal: cgroup paths are kernel-provided, not user input.
+        pieces = [p for p in group.split('/') if p not in ('', '.', '..')]
+        root = Path(base)
+        current = root
+        yield current
+        for piece in pieces:
+            current = current / piece
+            yield current
+
+    def positive_int(path):
         try:
-            quota = int(Path('/sys/fs/cgroup/cpu/cpu.cfs_quota_us').read_text())
-            period = int(Path('/sys/fs/cgroup/cpu/cpu.cfs_period_us').read_text())
-            if quota > 0 and period > 0:
-                quota_cpus = max(1, quota // period)
+            value = path.read_text().strip()
+            return int(value) if value.isdecimal() else None
+        except (OSError, ValueError):
+            return None
+
+    unified = Path('/sys/fs/cgroup')
+    if (unified / 'cgroup.controllers').exists():
+        for folder in walk(unified, paths['unified']):
+            try:
+                raw = (folder / 'cpu.max').read_text().split()
+                if len(raw) == 2 and raw[0] != 'max':
+                    quota, period = int(raw[0]), int(raw[1])
+                    if quota > 0 and period > 0:
+                        cpu_limits.append(quota / period)
+            except (OSError, ValueError, IndexError):
+                pass
+            limit = positive_int(folder / 'memory.max')
+            if limit is not None and limit > 0:
+                usage = positive_int(folder / 'memory.current')
+                if usage is not None:
+                    memory_limits.append(max(0, limit - usage))
+    else:
+        for folder in walk('/sys/fs/cgroup/cpu', paths['cpu']):
+            quota = positive_int(folder / 'cpu.cfs_quota_us')
+            period = positive_int(folder / 'cpu.cfs_period_us')
+            if quota is not None and period and quota > 0:
+                cpu_limits.append(quota / period)
+        for folder in walk('/sys/fs/cgroup/memory', paths['memory']):
+            limit = positive_int(folder / 'memory.limit_in_bytes')
+            usage = positive_int(folder / 'memory.usage_in_bytes')
+            if limit is not None and usage is not None and limit < (1 << 60):
+                memory_limits.append(max(0, limit - usage))
+    return (min(cpu_limits) if cpu_limits else None,
+            min(memory_limits) if memory_limits else None)
+
+
+def _flin_windows_memory_available():
+    """Standard-library fallback when optional psutil is not installed."""
+    if sys.platform != 'win32':
+        return None, None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [('dwLength', wintypes.DWORD), ('dwMemoryLoad', wintypes.DWORD),
+                        ('ullTotalPhys', ctypes.c_ulonglong),
+                        ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong),
+                        ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong),
+                        ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        state = MEMORYSTATUSEX()
+        state.dwLength = ctypes.sizeof(state)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(state)):
+            return int(state.ullAvailPhys), int(state.ullTotalPhys)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None, None
+
+
+def _flin_windows_process_affinity():
+    """Query the Windows process affinity mask when psutil is unavailable.
+
+    Windows with >64 CPUs may have several processor groups; the group-aware
+    psutil result is preferred. This legacy API reports the current mask only.
+    """
+    if sys.platform != 'win32':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = wintypes.HANDLE
+        k32.GetProcessAffinityMask.argtypes = (
+            wintypes.HANDLE, ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_size_t))
+        k32.GetProcessAffinityMask.restype = wintypes.BOOL
+        proc_mask, system_mask = ctypes.c_size_t(), ctypes.c_size_t()
+        ok = k32.GetProcessAffinityMask(k32.GetCurrentProcess(),
+                                        ctypes.byref(proc_mask), ctypes.byref(system_mask))
+        if ok and proc_mask.value:
+            return [i for i in range(ctypes.sizeof(proc_mask)*8)
+                    if proc_mask.value & (1 << i)]
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _flin_windows_cpu_percent_fallback():
+    """Measure CPU usage with Win32 GetSystemTimes, no extra Python package.
+
+    The native call returns aggregate system usage (not a processor-group aware
+    per-process measurement). Prefer psutil for the full view when available.
+    """
+    if sys.platform != 'win32':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        class FILETIME(ctypes.Structure):
+            _fields_ = [('low', wintypes.DWORD), ('high', wintypes.DWORD)]
+        k32 = ctypes.windll.kernel32
+        k32.GetSystemTimes.argtypes = (ctypes.POINTER(FILETIME),
+                                      ctypes.POINTER(FILETIME),
+                                      ctypes.POINTER(FILETIME))
+        k32.GetSystemTimes.restype = wintypes.BOOL
+        def sample():
+            idle, kernel, user = FILETIME(), FILETIME(), FILETIME()
+            if not k32.GetSystemTimes(ctypes.byref(idle),
+                                      ctypes.byref(kernel), ctypes.byref(user)):
+                return None
+            to_int = lambda ft: (int(ft.high) << 32) | int(ft.low)
+            return (to_int(idle), to_int(kernel) + to_int(user))
+        earlier = sample()
+        if earlier is None:
+            return None
+        time.sleep(0.15)
+        later = sample()
+        if later is None:
+            return None
+        total = later[1] - earlier[1]
+        idle = later[0] - earlier[0]
+        if total > 0:
+            return round(100.0*max(0.0, min(1.0, 1.0-idle/total)), 1)
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
+def _flin_cpu_percent_fallback(affinity):
+    """Measure Linux per-CPU utilization using two /proc/stat samples."""
+    if not sys.platform.startswith('linux'):
+        return None
+    def snapshot():
+        counters = {}
+        try:
+            with open('/proc/stat', encoding='ascii') as stream:
+                for line in stream:
+                    parts = line.split()
+                    if len(parts) < 5 or not parts[0].startswith('cpu'):
+                        continue
+                    suffix = parts[0][3:]
+                    if not suffix.isdecimal():
+                        continue
+                    values = [int(value) for value in parts[1:]]
+                    idle = values[3] + (values[4] if len(values) > 4 else 0)
+                    counters[int(suffix)] = (sum(values), idle)
+        except (OSError, ValueError):
+            return {}
+        return counters
+    before = snapshot()
+    if not before:
+        return None
+    time.sleep(0.10)
+    after = snapshot()
+    changes = []
+    for index in affinity:
+        if index in before and index in after:
+            total = after[index][0] - before[index][0]
+            idle = after[index][1] - before[index][1]
+            if total > 0:
+                changes.append(100.0 * (total-idle) / total)
+    return round(max(0.0, min(100.0, sum(changes)/len(changes))), 1) if changes else None
+
+
+def detect_cpu_resources():
+    """Observe actual machine limits and current free resources (Linux/Windows/macOS).
+
+    psutil is optional. With it, read process CPU affinity, physical cores,
+    per-CPU load and available RAM. Otherwise use stdlib platform fallbacks.
+    This function NEVER changes process affinity or resource reservations.
+    """
+    logical = max(1, os.cpu_count() or 1)
+    affinity = None
+    physical = None
+    available_bytes = total_bytes = None
+    cpu_load = None
+    backend = 'system'
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    if psutil is not None:
+        backend = 'psutil'
+        try:
+            logical = max(1, int(psutil.cpu_count(logical=True) or logical))
+            physical = psutil.cpu_count(logical=False)
         except (OSError, ValueError):
             pass
-    available = max(1, min(len(affinity), quota_cpus) if quota_cpus else len(affinity))
-    physical = set()
-    for cpu in affinity:
-        base = Path(f'/sys/devices/system/cpu/cpu{cpu}/topology')
         try:
-            package = (base / 'physical_package_id').read_text().strip()
-            core = (base / 'core_id').read_text().strip()
-            physical.add((package, core))
-        except OSError:
+            affinity = sorted(set(int(x) for x in psutil.Process().cpu_affinity()))
+        except (AttributeError, OSError, ValueError):
             pass
-    memory_available_gib = None
-    try:
-        memory_values = {}
-        for line in Path('/proc/meminfo').read_text().splitlines():
-            if line.startswith(('MemAvailable:', 'MemTotal:')):
-                key, value, *_ = line.split()
-                memory_values[key.rstrip(':')] = int(value) * 1024
-        bytes_available = memory_values.get('MemAvailable', memory_values.get('MemTotal'))
-        # Respect a cgroup memory allowance when one is configured.
         try:
-            limit_text = Path('/sys/fs/cgroup/memory.max').read_text().strip()
-            if limit_text.isdigit():
-                usage = int(Path('/sys/fs/cgroup/memory.current').read_text().strip())
-                bytes_available = min(bytes_available, max(0, int(limit_text) - usage))
-        except (OSError, ValueError, TypeError):
+            memory = psutil.virtual_memory()
+            available_bytes, total_bytes = int(memory.available), int(memory.total)
+        except (OSError, ValueError):
             pass
-        if bytes_available is not None:
-            memory_available_gib = round(bytes_available / (1024 ** 3), 2)
-    except (OSError, ValueError):
-        pass
-    return {'system_logical': logical, 'affinity_logical': len(affinity),
-            'physical_visible': len(physical) if physical else None,
-            'quota_logical': quota_cpus, 'available': available,
-            'cpu_ids': tuple(affinity),
-            'memory_available_gib': memory_available_gib}
+    if affinity is None:
+        try:
+            affinity = sorted(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            affinity = None
+        if affinity is None:
+            affinity = _flin_windows_process_affinity()
+        if affinity is None:
+            affinity = list(range(logical))
+    if not affinity:
+        affinity = list(range(logical))
+    if physical is None and sys.platform.startswith('linux'):
+        cores = set()
+        for cpu in affinity:
+            base = Path(f'/sys/devices/system/cpu/cpu{cpu}/topology')
+            try:
+                pkg = (base / 'physical_package_id').read_text().strip()
+                core = (base / 'core_id').read_text().strip()
+                cores.add((pkg, core))
+            except OSError:
+                pass
+        physical = len(cores) if cores else None
+    if available_bytes is None:
+        if sys.platform.startswith('linux'):
+            values = {}
+            try:
+                for line in Path('/proc/meminfo').read_text().splitlines():
+                    if line.startswith(('MemAvailable:', 'MemTotal:')):
+                        key, number, *_ = line.split()
+                        values[key[:-1]] = int(number) * 1024
+                available_bytes = values.get('MemAvailable', values.get('MemTotal'))
+                total_bytes = values.get('MemTotal')
+            except (OSError, ValueError):
+                pass
+        elif sys.platform == 'win32':
+            available_bytes, total_bytes = _flin_windows_memory_available()
+        else:
+            try:
+                available_bytes = int(os.sysconf('SC_AVPHYS_PAGES')) * int(os.sysconf('SC_PAGE_SIZE'))
+                total_bytes = int(os.sysconf('SC_PHYS_PAGES')) * int(os.sysconf('SC_PAGE_SIZE'))
+            except (AttributeError, OSError, ValueError):
+                pass
+    quota_cores, cgroup_memory_left = _flin_linux_cgroup_resources()
+    quota_slots = max(1, math.floor(quota_cores)) if quota_cores is not None else None
+    capacity = max(1, min(len(affinity), quota_slots) if quota_slots else len(affinity))
+    if available_bytes is not None and cgroup_memory_left is not None:
+        available_bytes = min(available_bytes, cgroup_memory_left)
+    elif available_bytes is None:
+        available_bytes = cgroup_memory_left
+    if psutil is not None:
+        try:
+            loads = psutil.cpu_percent(interval=0.12, percpu=True)
+            chosen = [loads[idx] for idx in affinity if 0 <= idx < len(loads)]
+            if chosen:
+                cpu_load = round(sum(chosen) / len(chosen), 1)
+        except (OSError, ValueError):
+            pass
+    if cpu_load is None:
+        cpu_load = _flin_cpu_percent_fallback(affinity)
+    if cpu_load is None:
+        cpu_load = _flin_windows_cpu_percent_fallback()
+    to_gib = lambda n: round(max(0, n) / (1024 ** 3), 2) if n is not None else None
+    return {
+        'system_logical': logical,
+        'affinity_logical': len(affinity),
+        'physical_visible': physical,
+        'quota_logical': quota_slots,
+        'quota_cores': round(quota_cores, 3) if quota_cores is not None else None,
+        'available': capacity,
+        'cpu_ids': tuple(affinity),
+        'cpu_load_pct': cpu_load,
+        'memory_available_gib': to_gib(available_bytes),
+        'memory_total_gib': to_gib(total_bytes),
+        'resource_backend': backend,
+    }
 
 
-def recommend_build_resources(info):
-    """Conservative starting points for mixed network I/O + SQLite collection.
+def recommend_build_resources(info, read_pdf=False):
+    """Adapt to actual CPU headroom, free RAM and the selected collection mode.
 
-    Limits describe schedulable *logical CPUs*, not exclusive physical cores.
-    Parallel threads are primarily I/O-bound; using all available processors
-    or one thread per processor is not automatically optimal.
+    This is an initial operating suggestion, not a throughput benchmark. APIs,
+    PDF downloads and SQLite's serialized writes can still set lower limits.
+    No fixed 70%% CPU / 45%% worker fraction or eight-worker ceiling is used.
     """
     cap = max(1, int(info['available']))
-    # Leave some logical CPUs for desktop, database, and OS work.  Ollama is
-    # a separate process, and does not inherit collector thread affinity.
-    if cap <= 2:
-        cpu = cap
-    elif cap <= 4:
-        cpu = cap - 1
+    busy = info.get('cpu_load_pct')
+    if busy is not None:
+        busy = max(0.0, min(100.0, float(busy)))
+        headroom = cap * (1.0 - busy / 100.0)
+        cpu = round(headroom * 0.95)
     else:
-        cpu = min(cap, max(2, round(cap * 0.70)))
-    # Requests spend most of their lifetime waiting for remote APIs, while
-    # SQLite writes are serialized.  More than ~8 threads is seldom a useful
-    # default before measuring rate limits and lock contention.
-    workers = min(cap, 8, max(1, round(cpu * 0.45)))
+        cpu = cap
+    # Reserve one available logical CPU for an interactive desktop when possible.
     if cap >= 4:
-        workers = max(2, workers)
-    # Low host RAM means multiple simultaneous PDF downloads/parsers can swap.
-    # This only adjusts the suggestion, not the configurable hardware cap.
+        cpu = min(cpu, cap - 1)
+    cpu = max(1, min(cap, cpu))
+    # I/O workers need not equal active CPU cores; PDF parsing is more memory heavy.
+    factor = 0.85 if read_pdf else 0.72
+    workers = max(1, min(cap, math.ceil(cpu * factor) + 1))
     ram_gib = info.get('memory_available_gib')
     if ram_gib is not None:
-        if ram_gib < 2:
-            workers = min(workers, 2)
-        elif ram_gib < 4:
-            workers = min(workers, 3)
-        elif ram_gib < 8:
-            workers = min(workers, 5)
-    return {'cpu_budget': max(1, int(cpu)), 'workers': max(1, int(workers)),
-            'worker_max': cap, 'cpu_max': cap}
+        # Reserve free RAM for SQLite, Python, GUI, and other foreground work.
+        per_worker = 1.2 if read_pdf else 0.48
+        ram_cap = max(1, math.floor((max(0.0, float(ram_gib)) - 0.8) / per_worker))
+        workers = min(workers, ram_cap)
+        if ram_gib < 1.5:
+            cpu = min(cpu, 2)
+            workers = 1
+    return {'cpu_budget': cpu, 'workers': workers,
+            'worker_max': cap, 'cpu_max': cap, 'pdf_mode': bool(read_pdf),
+            'cpu_load_pct': busy, 'memory_available_gib': ram_gib}
 
 
 def constrain_collector_cpu_affinity(cpu_budget, log=None):
-    """Restrict collector/worker threads, leaving GUI and separate Ollama alone."""
+    """Apply Linux per-thread affinity only to the background collector thread.
+
+    Worker threads created by the collector inherit its affinity; Tk and any
+    external Ollama process keep their own settings. Windows/macOS do not have
+    this Linux per-thread API, so CPU budget remains an advisory GUI setting.
+    """
     if not hasattr(os, 'sched_setaffinity'):
         if log:
-            log(' platform NOT support building workers  CPU affinity; only Limit simultaneously work run state count .')
+            log('Collector CPU affinity is not supported on this platform; worker-count limit remains active.')
         return False
     info = detect_cpu_resources()
     selected = info['cpu_ids'][:max(1, min(int(cpu_budget), info['available']))]
     try:
         os.sched_setaffinity(0, set(selected))
         if log:
-            log(f'CPU  cores use maximum :{len(selected)}/{info["available"]}  items available logic processors ( only Background building ).')
+            log(f'Collector affinity: {len(selected)}/{info["available"]} permitted logical CPUs (Linux worker threads only).')
         return True
     except OSError as exc:
         if log:
-            log(f' Settings  CPU affinity  Failed :{exc}; retain workers count Limit .')
+            log(f'Collector affinity could not be applied ({exc}); worker-count limit remains active.')
         return False
+
+
 NODE_STYLES = {
     'theory': {'name':' Topic / theory ', 'color':'#ffb34d', 'marker':'o', 'size':140, 'legend':'●'},
     'paper': {'name':' Research Paper ', 'color':'#54acff', 'marker':'s', 'size':46, 'legend':'■'},
@@ -8414,13 +8670,15 @@ class NetworkWindow:
         self.topic_count=tk.IntVar(value=64)
         self.papers_count=tk.IntVar(value=100)
         self.continuous_discovery=tk.BooleanVar(value=True)
-        self.cpu_recommendation = recommend_build_resources(self.cpu_info)
+        self._resource_manual_override = False
+        self.cpu_recommendation = recommend_build_resources(self.cpu_info, read_pdf=False)
         self.workers_count=tk.IntVar(value=self.cpu_recommendation['workers'])
         self.cpu_budget_count=tk.IntVar(value=self.cpu_recommendation['cpu_budget'])
         self.cpu_capacity_label=tk.StringVar(value=self._cpu_capacity_text())
         self.cpu_recommendation_label=tk.StringVar(value=self._cpu_recommendation_text())
         self.offset=tk.IntVar(value=0)
         self.pdf_mode=tk.BooleanVar(value=False)
+        self.pdf_mode.trace_add('write', lambda *_: self.refresh_cpu_capacity(quiet=True))
         self.wiki_references_mode=tk.BooleanVar(value=True)
         box=self._group(inside,'04  Automatic Network Building',
             'Wikipedia, arXiv, Crossref, OpenAIRE, DBLP, Europe PMC; optional OpenAlex and Semantic Scholar. Sources directly train FLIN.')
@@ -8440,15 +8698,20 @@ class NetworkWindow:
         self.label(box,'',textvariable=self.cpu_capacity_label,note=True,wraplength=350).pack(anchor='w')
         row=self._row(box)
         cell=ttk.Frame(row,style='Side.TFrame');cell.pack(side='left',fill='x',expand=True,padx=(0,6))
-        self.label(cell,'Collector CPU limit (logical cores)',note=True).pack(anchor='w')
+        self.label(cell,'Collector CPU budget (logical CPUs)',note=True).pack(anchor='w')
         self.cpu_budget_spinner=ttk.Spinbox(cell,from_=1,to=self.cpu_info['available'],
-                            width=9,textvariable=self.cpu_budget_count,style='Dark.TSpinbox')
+                            width=9,textvariable=self.cpu_budget_count,style='Dark.TSpinbox',
+                            command=self._mark_resource_override)
         self.cpu_budget_spinner.pack(fill='x',pady=(4,0))
         cell=ttk.Frame(row,style='Side.TFrame');cell.pack(side='left',fill='x',expand=True)
         self.label(cell,'Parallel topic workers',note=True).pack(anchor='w')
         self.workers_spinner=ttk.Spinbox(cell,from_=1,to=self.cpu_info['available'],
-                            width=9,textvariable=self.workers_count,style='Dark.TSpinbox')
+                            width=9,textvariable=self.workers_count,style='Dark.TSpinbox',
+                            command=self._mark_resource_override)
         self.workers_spinner.pack(fill='x',pady=(4,0))
+        for spinner in (self.cpu_budget_spinner, self.workers_spinner):
+            spinner.bind('<KeyRelease>', self._mark_resource_override)
+            spinner.bind('<FocusOut>', self._mark_resource_override)
         self.label(box,'',textvariable=self.cpu_recommendation_label,note=True,
                    wraplength=350).pack(anchor='w',pady=(7,2))
         row=self._row(box)
@@ -8456,8 +8719,9 @@ class NetworkWindow:
                    style='Dark.TButton').pack(side='left',fill='x',expand=True,padx=(0,4))
         ttk.Button(row,text='Detect Again',command=self.refresh_cpu_capacity,
                    style='Dark.TButton').pack(side='left',fill='x',expand=True)
-        self.label(box,'CPU limits apply to background collectors only, not Ollama. '
-                       'Network and SQLite contention may limit throughput. Respect API quotas.',
+        self.label(box,'On Linux, CPU affinity applies to collector worker threads; on Windows, '
+                       'the CPU budget is advisory and the worker count is enforced. '
+                       'API rate limits and SQLite writes may cap throughput.',
                    note=True,wraplength=350).pack(anchor='w',pady=(2,4))
         self.label(box,'Discovery state is saved. The next build resumes newly found mathematical topics automatically.',
                    note=True,wraplength=345).pack(anchor='w',pady=(7,4))
@@ -10042,51 +10306,73 @@ class NetworkWindow:
                 self.events.put(('v7_iteration_done',(set_id,True,str(exc))))
         self._start_background_thread(target=worker, name=f'BrainReview-{set_id}')
 
+    def _mark_resource_override(self, _event=None):
+        """Preserve operator-chosen CPU/worker settings across a live refresh."""
+        self._resource_manual_override = True
+
     def _cpu_capacity_text(self):
-        info=self.cpu_info
-        physical=str(info['physical_visible']) if info['physical_visible'] else 'unknown'
-        quota=f"; CPU quota {info['quota_logical']}" if info['quota_logical'] else ''
-        return (f"System: {info['system_logical']} logical CPUs; {physical} visible physical "
-                f"cores; affinity {info['affinity_logical']} logical CPUs{quota}; "
-                f"collector CPU limit {info['available']}, worker limit {info['available']}.")
+        info = self.cpu_info
+        physical = info.get('physical_visible')
+        quota = info.get('quota_cores')
+        quota_note = f'; container quota {quota:g} CPUs' if quota is not None else ''
+        load = info.get('cpu_load_pct')
+        load_note = f'; current CPU usage {load:g}%' if load is not None else '; CPU usage unavailable'
+        ram = info.get('memory_available_gib')
+        ram_note = f'; free RAM {ram:g} GiB' if ram is not None else '; free RAM unavailable'
+        return (f"Detected ({info.get('resource_backend', 'system')}): {info['system_logical']} logical / "
+                f"{physical if physical else '?'} physical CPUs; "
+                f"process allowed {info['affinity_logical']}; usable {info['available']}"
+                f"{quota_note}{load_note}{ram_note}.")
 
     def _cpu_recommendation_text(self):
-        advice=self.cpu_recommendation
-        ram=self.cpu_info.get('memory_available_gib')
-        ram_note=f'; available RAM {ram:g} GiB' if ram is not None else ''
-        return (f"Suggested: {advice['cpu_budget']} collector logical CPUs and "
-                f"{advice['workers']} workers{ram_note}. Balance GUI responsiveness, "
-                'API quotas, and SQLite write contention.')
+        advice = self.cpu_recommendation
+        mode = 'PDF extraction' if advice.get('pdf_mode') else 'standard literature collection'
+        manual = ' Manual selection retained.' if self._resource_manual_override else ''
+        return (f"Live suggestion ({mode}): {advice['cpu_budget']} collector logical CPUs, "
+                f"{advice['workers']} parallel workers (maximum {advice['worker_max']}). "
+                f"Based on current CPU load, available RAM and process limits; "
+                f"not an API/SQLite throughput benchmark.{manual}")
 
     def apply_cpu_recommendation(self):
         if self.collector and self.collector.is_alive():
-            self.status.set('Collection is running. CPU and worker settings will take effect on the next run.')
+            self.status.set('Collection is running. Settings will take effect on the next run.')
             return
+        # "Use Recommended" always performs a new resource measurement.
+        self._resource_manual_override = False
+        self.refresh_cpu_capacity(quiet=True)
         self.cpu_budget_count.set(self.cpu_recommendation['cpu_budget'])
         self.workers_count.set(self.cpu_recommendation['workers'])
-        self.status.set(f"Applied hardware recommendations: CPU {self.cpu_recommendation['cpu_budget']},"
-                        f"parallel workers {self.cpu_recommendation['workers']}")
+        self.cpu_recommendation_label.set(self._cpu_recommendation_text())
+        self.status.set(f"Applied live hardware recommendation: "
+                        f"CPU {self.cpu_recommendation['cpu_budget']}, "
+                        f"workers {self.cpu_recommendation['workers']}.")
 
-    def refresh_cpu_capacity(self):
-        self.cpu_info = detect_cpu_resources()
-        capacity = self.cpu_info['available']
-        self.cpu_recommendation = recommend_build_resources(self.cpu_info)
+    def refresh_cpu_capacity(self, quiet=False):
+        info = detect_cpu_resources()
+        advice = recommend_build_resources(info, read_pdf=bool(self.pdf_mode.get()))
+        self.cpu_info, self.cpu_recommendation = info, advice
+        capacity = info['available']
+        self.cpu_budget_spinner.configure(to=capacity)
+        self.workers_spinner.configure(to=advice['worker_max'])
+        # Explicit edits are respected; automatic values track each new measurement.
+        if not self._resource_manual_override and not (self.collector and self.collector.is_alive()):
+            self.cpu_budget_count.set(advice['cpu_budget'])
+            self.workers_count.set(advice['workers'])
+        else:
+            for variable in (self.cpu_budget_count, self.workers_count):
+                try:
+                    value = int(variable.get())
+                except (ValueError, tk.TclError):
+                    value = advice['cpu_budget'] if variable is self.cpu_budget_count else advice['workers']
+                variable.set(max(1, min(capacity, value)))
         self.cpu_capacity_label.set(self._cpu_capacity_text())
         self.cpu_recommendation_label.set(self._cpu_recommendation_text())
-        self.cpu_budget_spinner.configure(to=capacity)
-        self.workers_spinner.configure(to=self.cpu_recommendation['worker_max'])
-        # Preserve user's manual selection when it remains in range.
-        for variable in (self.cpu_budget_count, self.workers_count):
-            try:
-                value = int(variable.get())
-            except (ValueError, tk.TclError):
-                value = self.cpu_recommendation['cpu_budget'] if variable is self.cpu_budget_count else self.cpu_recommendation['workers']
-            variable.set(max(1, min(capacity, value)))
-        if self.collector and self.collector.is_alive():
-            self.status.set('CPU capacity was updated. New limits will apply to the next collection run.')
-        else:
-            self.status.set(f'Hardware checked again. CPU and worker limit: {capacity};'
-                            f"Recommended: {self.cpu_recommendation['cpu_budget']}  verify /{self.cpu_recommendation['workers']}  workers ")
+        if not quiet:
+            if self.collector and self.collector.is_alive():
+                self.status.set('Measured live resources; settings will apply on the next build.')
+            else:
+                self.status.set(f"Resources refreshed: {capacity} usable logical CPUs; "
+                                f"recommend {advice['cpu_budget']} CPU / {advice['workers']} workers.")
 
     def start(self, retry_failed_only=False, references_only=False):
         if self.collector and self.collector.is_alive():
@@ -10097,6 +10383,8 @@ class NetworkWindow:
             else:
                 self.status.set('A build is still active. You can pause or stop and save.')
             return
+        # Recheck load/RAM at launch: long-open desktop sessions may change.
+        self.refresh_cpu_capacity(quiet=True)
         try:
             count = int(self.topic_count.get())
             per_theory = int(self.papers_count.get())
@@ -13059,7 +13347,12 @@ if __name__ == "__main__":
         print(' recommendation parallel workers count :', rec['workers'])
         if info.get('memory_available_gib') is not None:
             print(' Current available  RAM (GiB):', info['memory_available_gib'])
-        print(' Note : recommendation with  I/O  and  SQLite  mixed work for baseline , not actual benchmark ;CPU affinity  NOT Limit Independent  Ollama.')
+        print(' Current CPU load (% of permitted logical CPUs):', info.get('cpu_load_pct') if info.get('cpu_load_pct') is not None else 'unavailable')
+        print(' Available RAM / total RAM (GiB):', info.get('memory_available_gib'), '/', info.get('memory_total_gib'))
+        print(' Detection backend:', info.get('resource_backend'))
+        print(' Note: these are live recommendations, not a performance benchmark. SQLite, remote provider limits and optional PDF parsing may reduce useful concurrency.')
+        if os.name == 'nt':
+            print(' Note: Windows worker count is enforced; a per-thread Linux-style CPU affinity limit is not available.')
     elif args.math_coverage:
         with database() as con:
             print(json.dumps(mathematical_coverage_report(con),ensure_ascii=False,indent=2))
