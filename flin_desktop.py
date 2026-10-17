@@ -23,7 +23,6 @@ import random
 import re
 import sqlite3
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 import traceback
@@ -5134,6 +5133,72 @@ def flin_stream_discovery(con, session, limit, stop_event, on_topic,
     return 'frontier_idle',stats
 
 
+# A finite SOURCE frontier can be drained; no amount of crawling proves that all
+# mathematics is known. The completion flag therefore describes only the source
+# snapshot, not universal scientific or theoretical completeness.
+FLIN_FRONTIER_RECHECK_HOURS = max(1, min(168, int(os.environ.get('FLIN_FRONTIER_RECHECK_HOURS', '24'))))
+
+
+def flin_frontier_health(con, *, workers_pending=0):
+    """Evaluate the complete persistent frontier, not the GUI's visible graph.
+
+    A single failure, queued topic, unprocessed memory-unit search lead, or
+    outstanding worker blocks any assertion of finished collection.
+    """
+    cats = dict(con.execute('SELECT state,COUNT(*) FROM flin_discovery_categories GROUP BY state'))
+    topics = dict(con.execute('SELECT state,COUNT(*) FROM flin_discovery_topics GROUP BY state'))
+    incomplete = int(con.execute("""SELECT COUNT(*) FROM abc_topics WHERE state IN
+        ('running','skipped_search','error','interrupted','partial')""").fetchone()[0])
+    replay = int(con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0])
+    # Has the incremental memory->literature cursor actually visited all units?
+    scan_row = con.execute("SELECT value FROM flin_discovery_meta WHERE key='memory_scan_rowid'").fetchone()
+    scan_through = int(scan_row[0]) if scan_row else 0
+    later_units = int(con.execute("SELECT COUNT(*) FROM abc_units WHERE rowid>? AND status='active'",
+                                  (scan_through,)).fetchone()[0])
+    unresolved = (sum(cats.get(k,0) for k in ('pending','error','running'))
+                  + sum(topics.get(k,0) for k in ('pending','claimed','error'))
+                  + incomplete + replay + later_units + max(0,int(workers_pending)))
+    return {'complete': unresolved==0, 'unresolved':unresolved,
+            'categories':cats, 'topics':topics, 'failed_topics':incomplete,
+            'pending_replay':replay, 'unscanned_active_units':later_units,
+            'workers_pending':int(workers_pending)}
+
+
+def flin_clear_verified_frontier(con):
+    with con:
+        con.execute("DELETE FROM flin_discovery_meta WHERE key IN "
+                    "('verified_frontier_utc','verified_frontier_counts')")
+
+
+def flin_store_verified_frontier(con, state):
+    if not state['complete']:
+        raise ValueError('Cannot mark an incomplete literature frontier as completed.')
+    with con:
+        con.execute("""INSERT OR REPLACE INTO flin_discovery_meta(key,value)
+            VALUES('verified_frontier_utc',?)""",
+            (datetime.datetime.now(datetime.timezone.utc).isoformat(),))
+        con.execute("""INSERT OR REPLACE INTO flin_discovery_meta(key,value)
+            VALUES('verified_frontier_counts',?)""",
+            (json.dumps(state,ensure_ascii=False,sort_keys=True),))
+
+
+def flin_recent_verified_frontier(con, *, now=None):
+    stamp=con.execute("SELECT value FROM flin_discovery_meta "
+                      "WHERE key='verified_frontier_utc'").fetchone()
+    if not stamp:
+        return False
+    try:
+        verified=datetime.datetime.fromisoformat(stamp[0])
+        if verified.tzinfo is None:
+            verified=verified.replace(tzinfo=datetime.timezone.utc)
+        clock=now or datetime.datetime.now(datetime.timezone.utc)
+        if (clock-verified).total_seconds() >= FLIN_FRONTIER_RECHECK_HOURS*3600:
+            return False
+        return flin_frontier_health(con)['complete']
+    except (ValueError,TypeError):
+        return False
+
+
 class Collector(threading.Thread):
     """Streaming topic producer + independent bounded topic workers.
 
@@ -5188,6 +5253,28 @@ class Collector(threading.Thread):
         # Canonical Wikipedia titles may resolve from multiple input aliases.
         # Only one worker may write a given resolved topic at a time.
         self._manual_claimed = set()
+        self._retry_attempts = defaultdict(int)
+        self._retry_limit = max(0,min(4,int(os.environ.get('FLIN_AUTO_RETRY_LIMIT','2'))))
+        self._retry_wait = max(1,min(300,int(os.environ.get('FLIN_RETRY_WAIT_SECONDS','15'))))
+        self._auto_repair_status = ''
+        self._verified_frontier = False
+        self._worker_last_event = {}
+        self._worker_active = {}
+        # Migrate incomplete old-process work only at start of a NEW collector.
+        # Never rewrite 'running' while another live collector owns those jobs.
+        with contextlib.closing(database()) as fix_con:
+            with fix_con:
+                restored=fix_con.execute("""UPDATE abc_topics SET state='interrupted',
+                    message='Recovered incomplete previous build; scheduled for retry',
+                    updated=CURRENT_TIMESTAMP WHERE state='running' """).rowcount
+                fix_con.execute("""UPDATE flin_discovery_topics SET state='pending'
+                    WHERE state='claimed' OR (state='archived' AND name IN
+                    (SELECT name FROM abc_topics WHERE state IN
+                    ('interrupted','partial','error','skipped_search')))""")
+                if restored:
+                    flin_clear_verified_frontier(fix_con)
+        if restored:
+            self.out.put(('discovery',f'Recovered {restored} unfinished topics from the previous session.'))
 
     def _record_api_outcome(self, success=False, error=None):
         """Never stop the entire crawl for one provider's quota/auth failure."""
@@ -5228,6 +5315,12 @@ class Collector(threading.Thread):
 
     def _send_worker(self, worker, title, phase, done=0, target=0, page=0, linked=0):
         self.last_activity = time.monotonic()
+        with self.counter_lock:
+            self._worker_last_event[worker] = self.last_activity
+            if title and not str(phase).lower().startswith(('finished','idle')):
+                self._worker_active[worker] = title
+            else:
+                self._worker_active.pop(worker,None)
         self.out.put(('worker', (worker, title, phase, done, target, page, linked)))
 
     def _put_job(self, item):
@@ -5765,6 +5858,24 @@ class Collector(threading.Thread):
                     self._process_theory(worker, *job)
             except Exception as exc:
                 self.log(f'Worker {worker}, unexpected error: {type(exc).__name__}: {exc}')
+                # In normal flow _process_theory_abc persists exceptions itself.
+                # This catches failures outside that handler (e.g. manual-topic
+                # resolution) so no durable `running` job is orphaned.
+                title = (str(job[1]) if isinstance(job,tuple) and
+                         len(job)==2 and job[0]=='manual_topic'
+                         else str(job[0]) if isinstance(job,tuple) and job else '')
+                if title:
+                    try:
+                        with contextlib.closing(database()) as failure_con:
+                            with failure_con:
+                                failure_con.execute('''UPDATE abc_topics SET state='error',
+                                    message=?,updated=CURRENT_TIMESTAMP WHERE name=?
+                                    AND state='running' ''',
+                                    (f'Worker failure: {type(exc).__name__}: {str(exc)[:270]}',title))
+                                failure_con.execute("UPDATE flin_discovery_topics SET state='pending' WHERE name=?",
+                                                    (title,))
+                    except Exception as db_exc:
+                        self.log(f'Cannot record worker failure: {str(db_exc)[:180]}')
             finally:
                 self.jobs.task_done()
                 self._send_worker(worker, '', 'Idle')
@@ -5794,6 +5905,69 @@ class Collector(threading.Thread):
             except Exception as exc:
                 self.log('Warning: memory-quality maintenance paused: '+str(exc)[:180])
                 self._purity_maintenance_stop.wait(8)
+
+    def _retry_saved_incomplete_topics(self):
+        """Repair a bounded number of failed/abandoned topics after workers drain.
+
+        Each topic gets at most _retry_limit requeues in one build session. The
+        retry set stays in SQLite on a permanent source failure; no hot loop.
+        """
+        if self.stopped.is_set():
+            return 0, 0
+        with contextlib.closing(database()) as con:
+            # All queue jobs have finished. Repair work left claimed by a dead
+            # worker; archive topics that really have final successful status.
+            with con:
+                con.execute("""UPDATE abc_topics SET state='interrupted',
+                    message='Recovered abandoned topic after worker completion'
+                    WHERE state='running' AND name IN
+                    (SELECT name FROM flin_discovery_topics WHERE state='claimed')""")
+                con.execute("""UPDATE flin_discovery_topics SET state='archived'
+                    WHERE state='claimed' AND EXISTS
+                    (SELECT 1 FROM abc_topics a WHERE a.name=flin_discovery_topics.name
+                     AND a.state IN ('complete','no_candidates','off_topic'))""")
+            rows=con.execute("""SELECT name FROM abc_topics WHERE state IN
+                ('interrupted','partial','error','skipped_search') ORDER BY updated,name
+                LIMIT 2000""").fetchall()
+            orphaned=con.execute("""SELECT f.name FROM flin_discovery_topics f
+                WHERE f.state='claimed' AND NOT EXISTS
+                (SELECT 1 FROM abc_topics a WHERE a.name=f.name)""").fetchall()
+            candidate_names=list(dict.fromkeys([r[0] for r in rows]+[r[0] for r in orphaned]))
+            retry=[name for name in candidate_names if self._retry_attempts[name]<self._retry_limit]
+            if retry:
+                with con:
+                    for name in retry:
+                        self._retry_attempts[name]+=1
+                        con.execute("""INSERT OR IGNORE INTO flin_discovery_topics
+                            (name,url,origin) SELECT name,COALESCE(url,''),'auto_recovery'
+                            FROM abc_topics WHERE name=?""",(name,))
+                        con.execute("UPDATE flin_discovery_topics SET state='pending' WHERE name=?",(name,))
+                    flin_clear_verified_frontier(con)
+        return len(retry),len(candidate_names)
+
+    def _retry_failed_categories(self):
+        if self.stopped.is_set():return 0,0
+        with contextlib.closing(database()) as con:
+            rows=[r[0] for r in con.execute("SELECT name FROM flin_discovery_categories WHERE state='error'")]
+            retry=[name for name in rows if self._retry_attempts['category:'+name]<self._retry_limit]
+            if retry:
+                with con:
+                    for name in retry:
+                        self._retry_attempts['category:'+name]+=1
+                        con.execute("UPDATE flin_discovery_categories SET state='pending' WHERE name=?",(name,))
+                    flin_clear_verified_frontier(con)
+        return len(retry),len(rows)
+
+    def _wait_before_recovery(self, attempt):
+        delay=min(300,self._retry_wait*max(1,attempt))
+        self._set_phase('recovery_wait',delay)
+        self.log(f'Temporary source/build failure; automatic retry in {delay}s. '
+                 'Existing memory is saved and collection will resume.')
+        until=time.monotonic()+delay
+        while not self.stopped.is_set() and time.monotonic()<until:
+            self.wait_if_paused()
+            self.stopped.wait(min(.3,until-time.monotonic()))
+
 
     def run(self):
         """Queue each theory immediately when discovered; never wait for N titles."""
@@ -5897,7 +6071,7 @@ class Collector(threading.Thread):
                 else:
                     # Continuous discovery must wait for in-flight literature workers
                     # to create new FLIN memories before calling the frontier exhausted.
-                    idle_seconds=max(20,min(86400,int(os.environ.get('FLIN_IDLE_RETRY_SECONDS','900'))))
+                    idle_seconds=max(20,min(86400,int(os.environ.get('FLIN_IDLE_RETRY_SECONDS','60'))))
                     while not self.stopped.is_set():
                         self._set_phase('discovering')
                         with contextlib.closing(database()) as frontier_con:
@@ -5921,6 +6095,16 @@ class Collector(threading.Thread):
                             last_report = 0.0
                             while self.jobs.unfinished_tasks and not self.stopped.is_set():
                                 self.wait_if_paused()
+                                # Replace a worker that exited unexpectedly (not one
+                                # still making an API request). Never kill live threads
+                                # or run the same SQLite writer job twice.
+                                for ix, thread in enumerate(pool):
+                                    if not thread.is_alive() and not self.stopped.is_set():
+                                        replacement=threading.Thread(target=self._worker_loop,
+                                            args=(ix+1,),daemon=True,name=f'FLIN-Recovered-{ix+1}')
+                                        replacement.start()
+                                        pool[ix]=replacement
+                                        self.log(f'Restarted unexpectedly exited literature worker {ix+1}.')
                                 now = time.monotonic()
                                 if now - last_report > 10.0:
                                     remaining_jobs = self.jobs.unfinished_tasks
@@ -5934,6 +6118,36 @@ class Collector(threading.Thread):
                             if added:self.log(f'Expanded discovery with {added} source-grounded topics from new memory units.')
                         if pending or scanned:
                             continue
+                        # No discovered work remains THIS PASS. Distinguish a
+                        # genuinely drained source frontier from failed work.
+                        # Repair/requeue failed workers/categories at most N times.
+                        retry_topics,failed_topics=self._retry_saved_incomplete_topics()
+                        retry_cats,failed_cats=self._retry_failed_categories()
+                        if retry_topics or retry_cats:
+                            self.out.put(('discovery',
+                                f'Auto recovery: requeued {retry_topics} unfinished topics and '
+                                f'{retry_cats} failed category pages. Saved data is intact.'))
+                            self._wait_before_recovery(max(self._retry_attempts.values(),default=1))
+                            continue
+                        with contextlib.closing(database()) as health_con:
+                            health=flin_frontier_health(health_con,
+                                workers_pending=self.jobs.unfinished_tasks)
+                        if health['complete'] and self.discovery_outcome=='frontier_idle':
+                            self.discovery_outcome='source_frontier_exhausted'
+                            self._verified_frontier=True
+                            self.log('Current indexed literature frontier fully processed; '
+                                     'not a claim that all mathematical knowledge is complete.')
+                            break
+                        # Some sources have failed repeatedly. Do not silently
+                        # idle for 900 s or label this a complete trained network.
+                        if failed_topics or failed_cats or health['unresolved']:
+                            self.discovery_outcome='retry_exhausted'
+                            self._auto_repair_status=(f'{failed_topics} incomplete topics, '
+                                 f'{failed_cats} failed categories; status: {health}')[:550]
+                            self.log('Automatic recovery reached its retry limit. '
+                                     'The source frontier is NOT complete. '
+                                     +self._auto_repair_status)
+                            break
                         self.discovery_outcome='idle_wait'
                         self.wake_discovery.clear()
                         self.idle_until=time.monotonic()+idle_seconds
@@ -5994,11 +6208,22 @@ class Collector(threading.Thread):
                             continue
             for thread in pool:
                 thread.join()
+            if self._verified_frontier and not self.stopped.is_set():
+                with contextlib.closing(database()) as done_con:
+                    verification=flin_frontier_health(done_con,
+                        workers_pending=self.jobs.unfinished_tasks)
+                    if verification['complete']:
+                        flin_store_verified_frontier(done_con,verification)
+                    else:
+                        self._verified_frontier=False
+                        self._auto_repair_status=str(verification)[:450]
             result = ('service_error' if self.block_reason else
                       'stopped' if self.stopped.is_set() else
+                      'source_frontier_exhausted' if self._verified_frontier else
                       'partial' if self.failed else
                       'complete_skipped' if self.skipped_search else
                       'discovery_limited' if self.discovery_outcome=='source_limited' else
+                      'retry_exhausted' if self.discovery_outcome=='retry_exhausted' else
                       'frontier_idle' if self.discovery_outcome=='frontier_idle' else
                       'batch_limit' if self.discovery_outcome=='batch_limit' else 'complete')
             self.out.put(('done',result))
@@ -6407,7 +6632,11 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
     supports_think=True
     # Number of attempted requests is bounded even if the model repeatedly
     # rejects a response. No silent fallback to another model.
-    for attempt in range(7):
+    try:
+        attempt_limit = max(1,min(7,int(os.environ.get('BRAIN_OLLAMA_MAX_ATTEMPTS','3'))))
+    except ValueError:
+        attempt_limit = 3
+    for attempt in range(attempt_limit):
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError(' already Stop Generate ; Completed questions items retain .')
         payload={
@@ -6419,7 +6648,7 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
             'keep_alive':'90s',
         }
         if supports_think:payload['think']=think
-        if progress:progress(f' prepare reasoning :{model}| context  {num_ctx:,}| Output maximum  {output_budget:,} tokens| attempt  {attempt+1}/7')
+        if progress:progress(f' prepare reasoning :{model}| context  {num_ctx:,}| Output maximum  {output_budget:,} tokens| attempt  {attempt+1}/{attempt_limit}')
         sess=requests.Session();sess.trust_env=False
         accumulated=[];reasoning_chars=0;content_chars=0;finish_reason=''
         started=time.monotonic();last_update=0.0;context_retry=False;schema_retry=False;think_retry=False;length_retry=False
@@ -6532,36 +6761,18 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
 
 
 def flin_ollama_parallelism():
-        """Bound concurrent Ollama calls; ten workflow lanes do not imply ten GPUs.
+    """Only one local-model inference at a time, regardless of thread count.
 
-        BRAIN_OLLAMA_PARALLEL=1..10 overrides the automatic conservative gate.
-        The Ollama *server* must separately support that concurrency (for example
-        via OLLAMA_NUM_PARALLEL). An override never bypasses its own scheduler.
-        """
-        override=os.environ.get('BRAIN_OLLAMA_PARALLEL','').strip()
-        if override:
-            try:return max(1,min(10,int(override)))
-            except ValueError:return 1
-        # On consumer GPUs, every parallel KV cache consumes extra VRAM;
-        # recommend single-file inference under 12 GiB available VRAM.
-        try:
-            proc=subprocess.run(['nvidia-smi','--query-gpu=memory.free',
-                '--format=csv,noheader,nounits'],capture_output=True,text=True,
-                timeout=3,check=False)
-            free=[int(x.strip().split()[0]) for x in proc.stdout.splitlines()
-                  if x.strip().split()[0].isdigit()]
-            vram_mib=max(free) if free else 0
-        except (OSError,ValueError,subprocess.TimeoutExpired):
-            vram_mib=0
-        if vram_mib>=65536:return 10
-        if vram_mib>=49152:return 6
-        if vram_mib>=32768:return 4
-        if vram_mib>=16384:return 2
-        return 1
+    The question generator/reviewer/reviser must not contend for GPU memory.
+    This conservative policy also prevents an old BRAIN_OLLAMA_PARALLEL=10
+    environment override from unexpectedly re-enabling competing requests.
+    """
+    return 1
 
 
-_OLLAMA_PARALLEL_LIMIT=flin_ollama_parallelism()
-_OLLAMA_INFERENCE_GATE=threading.BoundedSemaphore(_OLLAMA_PARALLEL_LIMIT)
+_OLLAMA_PARALLEL_LIMIT = flin_ollama_parallelism()
+_OLLAMA_INFERENCE_GATE = threading.BoundedSemaphore(1)
+
 _ACTIVE_BRAIN_OLLAMA_MODEL=None
 
 
@@ -6590,19 +6801,24 @@ def _unload_previous_brain_model(next_model, progress=None):
 
 def ollama_json(model, prompt, num_predict=3200, timeout=600, *,
                 progress=None, cancel_event=None, think=False, response_schema=None):
-    """Bounded Ollama inference shared by ten independent question pipelines."""
+    """Serialize local model calls to avoid GPU/VRAM contention."""
     prompt=(str(prompt)+'\n\nLANGUAGE REQUIREMENT: Write all generated JSON string '
             'values (including titles, statements, reviews, critiques, and revisions) '
             'in clear academic English. Preserve mathematical symbols and exact source '
             'quotations. Do not translate titles or quotations used as provenance. '
             'Keep the specified JSON keys unchanged.')
     last_notice=0
+    queued_at=time.monotonic()
+    queue_timeout=max(30,min(1800,int(os.environ.get('BRAIN_OLLAMA_QUEUE_TIMEOUT','360'))))
     while not _OLLAMA_INFERENCE_GATE.acquire(timeout=1):
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError('Question generation canceled while waiting for Ollama.')
+        if time.monotonic()-queued_at>queue_timeout:
+            raise TimeoutError(f'Ollama is busy with another task for over {queue_timeout}s; '
+                               'no extra model jobs were started. Resume from saved question versions.')
         if progress and time.monotonic()-last_notice>5:
             progress(f'Waiting for an Ollama inference slot '
-                     f'(parallel limit {_OLLAMA_PARALLEL_LIMIT}; 10 independent question lanes).')
+                     '(serialized, one Ollama call at a time).')
             last_notice=time.monotonic()
     try:
         _unload_previous_brain_model(normalized_ollama_model(model),progress=progress)
@@ -8548,6 +8764,8 @@ class NetworkWindow:
         self.collector = None
         self._collector_completion_observed = False
         self._last_collector_heartbeat_ui = 0.0
+        self._last_frontier_status_check = 0.0
+        self._frontier_shown_complete = False
         # All GUI-owned Python workers are tracked on the Tk main thread.
         # Tk images/variables must not outlive the Tcl interpreter while any
         # worker still holds references to this window.
@@ -8594,6 +8812,7 @@ class NetworkWindow:
         self._stats_cache = None
         self._viewport_empty_reason = 'No memory units yet'
         self._build_ui()
+        self._refresh_build_completion_state()
         with database() as con:
             if con.execute('SELECT 1 FROM units LIMIT 1').fetchone():
                 self.has_started=True
@@ -8878,7 +9097,7 @@ class NetworkWindow:
             command=self.open_latest_question_set).pack(side='left',fill='x',expand=True)
         ttk.Button(box,text='Check Local Qwen3 4B Instruct',style='Dark.TButton',
             command=self.check_deepseek_ui).pack(fill='x',pady=(7,0))
-        self.deepseek_status=tk.StringVar(value='Ollama: 4B generation/review/revision, 3B critique; serialized inference and fallback on failure.')
+        self.deepseek_status=tk.StringVar(value='Ollama: sequential generation and review; one model inference at a time; original questions and review history are saved.')
         self.label(box,'',textvariable=self.deepseek_status,note=True,wraplength=350).pack(anchor='w',pady=(5,2))
 
         # Right: exactly the core collection controls in the reference image.
@@ -9759,51 +9978,57 @@ class NetworkWindow:
                 saved_titles={str(v.get('title','')).strip().casefold() for v in existing.values()}
                 missing=[slot for slot in range(1,11) if slot not in existing]
                 self.events.put(('v8_generation_status',(set_id,
-                    f'Ten independent draft lanes launched; Ollama inference limit '
-                    f'{_OLLAMA_PARALLEL_LIMIT} simultaneous request(s).')))
-                errors={}
+                    'Sequential draft generation: one question / one Ollama call at a time.')))
+                errors = {}
                 def draft_slot(slot, excluded=()):
-                    last=[]
+                    last = []
                     for option in candidates:
-                        if stopper.is_set():raise InterruptedError('Stopped')
+                        if stopper.is_set():
+                            raise InterruptedError('Stopped')
                         try:
-                            out=generate_question_batch(option,context,paths,1,
-                                existing_titles=tuple(excluded),slot_number=slot,
-                                progress=lambda detail:self.events.put(('v8_generation_status',
-                                    (set_id,f'Draft lane {slot}/10: '+str(detail)[:210]))),
+                            out = generate_question_batch(
+                                option, context, paths, 1,
+                                existing_titles=tuple(excluded), slot_number=slot,
+                                progress=lambda detail: self.events.put(
+                                    ('v8_generation_status',
+                                     (set_id, f'Question {slot}/10 | generating: {str(detail)[:190]}'))),
                                 cancel_event=stopper)
-                            if not out:raise ValueError('Missing valid question')
-                            return slot,out[0],option
-                        except InterruptedError:raise
-                        except Exception as exc:last.append(f'{option}: {exc}')
-                    raise RuntimeError('; '.join(last)[-600:])
-                with ThreadPoolExecutor(max_workers=10,thread_name_prefix='FLIN-Draft') as pool:
-                    jobs={pool.submit(draft_slot,slot,tuple(saved_titles)):slot for slot in missing}
-                    for job in as_completed(jobs):
-                        slot=jobs[job]
-                        if stopper.is_set():break
-                        try:
-                            _,question,used=job.result()
-                            title=str(question.get('title','')).strip().casefold()
-                            # Parallel results can collide; rerun just that lane
-                            # against all titles actually persisted so far.
-                            if not title or title in saved_titles:
-                                _,question,used=draft_slot(slot,tuple(saved_titles))
-                                title=str(question.get('title','')).strip().casefold()
-                            if not title or title in saved_titles:
-                                raise ValueError('Duplicate question title after retry')
-                            with database() as con:
-                                with con:store_candidate(con,set_id,slot,question,used)
-                            saved_titles.add(title)
-                            existing[slot]=question
-                            self.events.put(('v8_generation_progress',(set_id,len(existing),used)))
+                            if not out:
+                                raise ValueError('Missing valid question')
+                            return out[0], option
                         except InterruptedError:
-                            stopper.set()
-                            break
+                            raise
                         except Exception as exc:
-                            errors[slot]=str(exc)[:300]
+                            last.append(f'{option}: {exc}')
+                    raise RuntimeError('; '.join(last)[-600:])
+
+                # No ThreadPoolExecutor: drafts are generated and committed in
+                # slot order, and every subsequent prompt sees saved titles.
+                for slot in missing:
                     if stopper.is_set():
-                        for job in jobs:job.cancel()
+                        break
+                    self.events.put(('v8_generation_status',
+                        (set_id, f'Question {slot}/10 | generating and saving serially.')))
+                    try:
+                        question, used = draft_slot(slot, tuple(saved_titles))
+                        title = str(question.get('title', '')).strip().casefold()
+                        if not title or title in saved_titles:
+                            question, used = draft_slot(slot, tuple(saved_titles))
+                            title = str(question.get('title', '')).strip().casefold()
+                        if not title or title in saved_titles:
+                            raise ValueError('Duplicate question title after retry')
+                        with database() as con:
+                            with con:
+                                store_candidate(con, set_id, slot, question, used)
+                        saved_titles.add(title)
+                        existing[slot] = question
+                        self.events.put(('v8_generation_progress',
+                                         (set_id, len(existing), used)))
+                    except InterruptedError:
+                        stopper.set()
+                        break
+                    except Exception as exc:
+                        errors[slot] = str(exc)[:300]
                 if stopper.is_set():
                     self.events.put(('v8_generation_cancelled',(set_id,len(existing))))
                 elif errors or len(existing)!=10:
@@ -9849,7 +10074,7 @@ class NetworkWindow:
                 if short.get('ready') is not True:
                     raise RuntimeError('Ollama  can connection , butModelno response correct confirm  JSON:'+str(short)[:240])
                 self.events.put(('v8_model_check',(True,
-                    '✓ '+candidates[0]+'  can Output  JSON;Generation/ research review use  4B, Critique use  3B; singleModelsequence line operation .')))
+                    '✓ '+candidates[0]+' supports JSON; question generation and review run sequentially with one local model call at a time.')))
             except Exception as exc:
                 self.events.put(('v8_model_check',(False,str(exc))))
         self._start_background_thread(target=worker, name='LocalModelHealth')
@@ -10004,15 +10229,28 @@ class NetworkWindow:
                    'final':(.97,.99),'select':(.99,.999)}
         lower,upper=fractions.get(phase,(0,.0))
         fraction=done/total if total else 1
-        if phase in ('final','select'):
-            pct=97+(1 if phase=='final' else 2)*fraction
-        else:
-            pct=100*((cycle-1)+(lower+(upper-lower)*fraction))/maxround
-            pct=min(97,pct)
-        state['review_value'].set(max(float(state['review_value'].get()),min(99,pct)))
+        if not slot:
+            # Legacy stage-only progress (all review stages without a slot).
+            # In serial mode the per-slot calculation below is authoritative;
+            # never jump to 97% when question 1/10 reaches verification.
+            if phase in ('final','select'):
+                pct=97+(1 if phase=='final' else 2)*fraction
+            else:
+                pct=100*((cycle-1)+(lower+(upper-lower)*fraction))/maxround
+                pct=min(97,pct)
+            state['review_value'].set(max(float(state['review_value'].get()),min(99,pct)))
+        if slot:
+            # Overall bar is explicitly estimated from requested MAX rounds;
+            # early stopping may skip some future model calls.
+            phase_fraction = (cycle - 1 + (lower + (upper - lower) * fraction)) / maxround
+            if phase in ('final', 'select'):
+                phase_fraction = 1.0
+            serial_pct = 100 * ((slot - 1) + min(1.0, phase_fraction)) / 10
+            state['review_value'].set(max(float(state['review_value'].get()),
+                                          min(99, serial_pct)))
         state['review_caption'].set(
-            f'Reviewestimated progress : #  {min(cycle,maxround)}/{maxround}  rounds |{name}'
-            +('( final verification for )' if phase in ('final','select') else ''))
+            f'Review | question {slot or "?"}/10 | round {min(cycle,maxround)}/{maxround} |{name}'
+            +(' (final verification)' if phase in ('final','select') else ''))
         state['review_cycle']=cycle
 
     def update_question_window(self,set_id):
@@ -10278,15 +10516,19 @@ class NetworkWindow:
         self.question_model_activity(set_id,True,'Model: preparing research review ')
         state['iterate_btn'].configure(state='disabled')
         self.update_question_window(set_id)
-        state['status'].set(f'10 independent review chains (Ollama model-call limit: {_OLLAMA_PARALLEL_LIMIT}). Each question reviews/revises and saves separately; up to '+str(maxround)+' rounds.')
+        state['status'].set(f'Sequential review: one question and one model call at a time, up to {maxround} rounds per question. Completed versions are saved.')
         def worker():
             try:
                 generator_candidates,_=available_ollama_models(generator)
-                judge_candidates,_=available_ollama_models(judge)
-                critic_candidates,_=available_ollama_models(critic)
+                judge_candidates=(generator_candidates if judge==generator
+                                  else available_ollama_models(judge)[0])
+                # A separate critic is only queried if the integrated judge
+                # feedback is insufficient or explicitly requested.
+                critic_candidates=(judge_candidates if critic==judge
+                                   else available_ollama_models(critic)[0])
                 self.events.put(('v7_iteration_progress',(set_id,
-                    f'10 independent judge/revise lanes, {_OLLAMA_PARALLEL_LIMIT} '
-                    f'concurrent Ollama calls; each lane stores its own versions.')))
+                    f'Sequential review | 10 questions | up to {maxround} rounds per question; '
+                    'only one Ollama inference at a time.')))
 
                 def stage(slot,description,options,function,*args,**kwargs):
                     failures=[]
@@ -10317,8 +10559,19 @@ class NetworkWindow:
                                     delta,used)
 
                 def review_slot(slot):
-                    for cycle in range(1,maxround+1):
-                        if stop_event.is_set():raise InterruptedError('Stopped')
+                    # Review rounds are an UPPER BOUND, not a promise that a
+                    # small local model can improve a capped/unverifiable
+                    # question twenty times. Stop when improvement stalls.
+                    best_score = -1
+                    stagnant_rounds = 0
+                    patience = max(2, min(6, int(os.environ.get('BRAIN_REVIEW_PATIENCE', '3'))))
+                    for cycle in range(1, maxround + 1):
+                        if stop_event.is_set():
+                            raise InterruptedError('Stopped')
+                        self.events.put(('v7_iteration_stage',
+                            (set_id,cycle,maxround,'judge',0,1,slot)))
+                        self.events.put(('v7_iteration_progress',
+                            (set_id,f'Question {slot}/10 | round {cycle}/{maxround} | evaluating.')))
                         with database() as con:
                             row=con.execute('''SELECT id,version,content_json FROM
                                 question_candidates WHERE set_id=? AND slot=? AND current=1
@@ -10352,8 +10605,29 @@ class NetworkWindow:
                                 prior_review=previous_review)
                             write_verdict(cid,verdict,used)
                         self.events.put(('v7_iteration_update',(set_id,slot,verdict['score'])))
-                        if verdict['score']>=100 or version>=maxround:
+                        score_now = int(verdict['score'])
+                        # Score ceilings (e.g. missing source evidence) make
+                        # 100 impossible for some questions. Count as progress
+                        # only a higher score or an explicitly accepted revision;
+                        # don't burn 20 expensive cycles on stagnant content.
+                        # A model may repeatedly say that a revision was
+                        # "accepted" without increasing its independently
+                        # scored quality. Such claims cannot reset stagnation.
+                        if score_now > best_score:
+                            best_score = score_now
+                            stagnant_rounds = 0
+                        else:
+                            stagnant_rounds += 1
+                        if score_now >= 100 or version >= maxround:
                             break
+                        if stagnant_rounds >= patience:
+                            self.events.put(('v7_iteration_progress',
+                                (set_id, f'Question {slot}/10: stopped early after '
+                                 f'{stagnant_rounds} rounds without a verified improvement '
+                                 f'(score {score_now}); preserving best version.')))
+                            break
+                        self.events.put(('v7_iteration_stage',
+                            (set_id,cycle,maxround,'critic',0,1,slot)))
                         with database() as con:
                             old=con.execute('''SELECT comment FROM question_feedback
                                 WHERE candidate_id=? AND role='critic' AND comment!=''
@@ -10371,6 +10645,8 @@ class NetworkWindow:
                             with database() as con:
                                 with con:save_feedback(con,cid,'critic',None,suggestion,model=used)
                         if stop_event.is_set():raise InterruptedError('Stopped')
+                        self.events.put(('v7_iteration_stage',
+                            (set_id,cycle,maxround,'revise',0,1,slot)))
                         try:
                             revised,used=stage(slot,'Revision',generator_candidates,
                                 revise_question,question,verdict,suggestion,context)
@@ -10396,6 +10672,8 @@ class NetworkWindow:
                         prev,prev_review=previous_question_review(
                             con,set_id,slot,current[1]) if not already else (None,None)
                     if not already:
+                        self.events.put(('v7_iteration_stage',
+                            (set_id,maxround,maxround,'final',0,1,slot)))
                         verdict,used=stage(slot,'Final verification',judge_candidates,
                             judge_question,json.loads(current[2]),context,
                             prior_question=prev,prior_review=prev_review)
@@ -10422,27 +10700,35 @@ class NetworkWindow:
                     self.events.put(('v7_iteration_update',(set_id,slot,best[1])))
                     return slot
 
-                completed=set();problems={};cancelled=False
-                with ThreadPoolExecutor(max_workers=10,thread_name_prefix='FLIN-Review') as pool:
-                    futures={pool.submit(review_slot,slot):slot for slot in range(1,11)}
-                    for future in as_completed(futures):
-                        slot=futures[future]
-                        try:
-                            future.result()
-                            completed.add(slot)
-                            self.events.put(('v7_iteration_stage',
-                                (set_id,maxround,maxround,'final',len(completed),10,slot)))
-                            self.events.put(('v7_iteration_progress',(set_id,
-                                f'Completed {len(completed)}/10 independent review lanes.')))
-                        except InterruptedError:
-                            cancelled=True
-                        except Exception as exc:
-                            problems[slot]=str(exc)[:380]
-                            self.events.put(('v7_iteration_progress',(set_id,
-                                f'Lane {slot} paused: {str(exc)[:180]}')))
-                        if stop_event.is_set():
-                            cancelled=True
-                            for pending in futures:pending.cancel()
+                completed = set()
+                problems = {}
+                cancelled = False
+                # One review pipeline at a time; no competing Ollama requests,
+                # no ten-worker queue and no cross-lane SQLite contention.
+                for slot in range(1, 11):
+                    if stop_event.is_set():
+                        cancelled = True
+                        break
+                    self.events.put(('v7_iteration_progress',
+                        (set_id, f'Reviewing question {slot}/10 sequentially '
+                         f'(completed {len(completed)}/10).')))
+                    try:
+                        review_slot(slot)
+                        completed.add(slot)
+                        self.events.put(('v7_iteration_stage',
+                            (set_id,maxround,maxround,'final',1,1,slot)))
+                        self.events.put(('v7_iteration_progress',
+                            (set_id, f'Question {slot}/10 saved and verified; '
+                             f'completed {len(completed)}/10.')))
+                    except InterruptedError:
+                        cancelled = True
+                        break
+                    except Exception as exc:
+                        problems[slot] = str(exc)[:380]
+                        self.events.put(('v7_iteration_progress',
+                            (set_id, f'Question {slot}/10 paused: {str(exc)[:180]}')))
+                        # The next question may still be reviewed; this one can
+                        # be resumed using its persisted candidates/feedback.
                 if cancelled or stop_event.is_set():
                     self.events.put(('v7_iteration_done',(set_id,True,None)))
                 elif problems:
@@ -10526,8 +10812,38 @@ class NetworkWindow:
             else:
                 self.status.set(f"Resources refreshed: {capacity} usable logical CPUs; "
                                 f"recommend {advice['cpu_budget']} CPU / {advice['workers']} workers.")
+ 
+    def _refresh_build_completion_state(self):
+        """Show a validated per-network source frontier, not false global completeness."""
+        if self.collector is not None and self.collector.is_alive():
+            return False
+        try:
+            with contextlib.closing(database()) as con:
+                completed=flin_recent_verified_frontier(con)
+        except sqlite3.DatabaseError:
+            completed=False
+        self._frontier_shown_complete = bool(completed)
+        if completed:
+            self.run_btn.configure(state='disabled',text='Source Frontier Completed ✓')
+            self.pipeline_title.set('✓ Current source frontier fully processed')
+            self.pipeline_detail.set(
+                'All discovered topics and categories have been processed, '
+                'with no outstanding failures. Existing memory remains available. '
+                f'New-source verification becomes available in up to {FLIN_FRONTIER_RECHECK_HOURS} hours.')
+            self.status.set('Source frontier completed; FLIN knowledge can still grow when new sources appear.')
+        else:
+            self.run_btn.configure(state='normal',text='Start Building (Literature → FLIN)')
+        return completed
+
 
     def start(self, retry_failed_only=False, references_only=False):
+        if not retry_failed_only and not references_only and self._refresh_build_completion_state():
+            messagebox.showinfo('Current Sources Fully Processed',
+                'The current verified literature frontier has no remaining work. '
+                'No new memories can be guaranteed without new sources; the automatic '
+                f'recheck window is {FLIN_FRONTIER_RECHECK_HOURS} hours. '
+                'This does not mean that all mathematics is known.')
+            return
         if self.collector and self.collector.is_alive():
             if (not retry_failed_only and not references_only
                     and self.collector.request_immediate_discovery()):
@@ -11732,7 +12048,7 @@ class NetworkWindow:
                     set_id,slot,score=msg
                     self.update_question_window(set_id)
                     state=self.question_windows.get(set_id)
-                    if state:state['status'].set(f'Stage 2/2: ProcessingReviewand Revision #  {slot}/10  questions , draft and score temporary NOT Display .')
+                    if state:state['status'].set(f'Question {slot}/10 | latest score: {score if score is not None else None} | serial review in progress.')
                 elif kind == 'v7_iteration_done':
                     set_id,stopped,error=msg
                     self.iteration_jobs.pop(set_id,None)
@@ -11760,6 +12076,15 @@ class NetworkWindow:
                     self._set_test_available(True)
                     self.delete_btn.configure(state="normal")
                     self.update_worker_panel()
+                    if msg=='source_frontier_exhausted':
+                        self._refresh_build_completion_state()
+                        self.append_log('✓ Current indexed source frontier verified complete; '
+                                        'no undiscovered knowledge completeness is implied.')
+                    elif msg=='retry_exhausted':
+                        self.pipeline_title.set('⚠ Build paused: source/worker recovery exhausted')
+                        self.pipeline_detail.set(getattr(self.collector,'_auto_repair_status','')[:540])
+                        self.append_log('⚠ Persistent source failures; saved network retained. '
+                                        'Check connectivity and retry failed topics.')
                     self.graph_phase.set('This build session has been saved. FLIN data remains in SQLite.')
                     self.status.set({"complete":"✓  this rounds Completed  ·  Data Saved ", "complete_skipped":
                                      f"⚠  this rounds with  {self.skipped_theories}  items search failed Topic  ·  Saved ",
@@ -11768,7 +12093,9 @@ class NetworkWindow:
                                      "error":"✕  occur Error , please see below Record ",
                                      "service_error":"🚨  literature provider average NOT available , Check connection / Import Index ",
                                      "batch_limit":"✓  this rounds Topic quota already full  ·  can resume Discover ",
-                                     "frontier_idle":"◇  currently knowledge public Source temporary no new Topic  ·  not All Mathematics already Discover complete ",
+                                     "source_frontier_exhausted":"✓ Current source frontier fully processed — no outstanding jobs or source failures",
+                                     "retry_exhausted":"⚠ Automatic recovery limit reached — check failed topics/provider and retry",
+                                     "frontier_idle":"◇ Temporarily no new sources; completeness unverified",
                                      "discovery_limited":"⚠ Wikipedia  category Source NOT complete  ·  Progress saved , next run can Retry "}.get(msg, " already Finish "))
         except queue.Empty:
             pass
@@ -11836,6 +12163,13 @@ class NetworkWindow:
                     elapsed=int(now-started)
                     state['request_caption'].set(
                         f'Modelactivity :Reviewalready run  {elapsed}  seconds | single imes please request duration NOT fixed define ')
+        # A verified frontier is a dated snapshot; let the user recheck when
+        # its finite freshness window expires without restarting the desktop.
+        if (self._frontier_shown_complete and
+                not (self.collector and self.collector.is_alive()) and
+                time.monotonic()-self._last_frontier_status_check > 60):
+            self._last_frontier_status_check = time.monotonic()
+            self._refresh_build_completion_state()
         self._poll_job = self.root.after(180, self.poll)
 
     def repair_math_relations(self):
