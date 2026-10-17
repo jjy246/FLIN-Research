@@ -6802,6 +6802,7 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                     parsed=_decode_model_json(raw)
                     return parsed
                 except ValueError as exc:
+                    last_error=f'JSON parse failed: {exc}; done_reason={finish_reason or "unknown"}; output_chars={len(raw)}'
                     # Ollama sometimes omits `done_reason=length`. Incomplete
                     # JSON can also be *short* (e.g. a 60-byte half-object),
                     # so the previous len(raw)>800 guard missed genuine cuts.
@@ -6849,7 +6850,16 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                         f' can Add  BRAIN_MAX_NUM_CTX( needs more multiple  RAM/VRAM);{last_error}')
                 working_prompt=smaller
                 if progress:progress('⚠  context already reached configured maximum ; retain primary relationship and reduce few Background Evidence then test .')
-    raise RuntimeError('Ollama  already reached automatic Retry imes count maximum ; Check context , Output long degrees orModelStatus .'+str(last_error or '')[:300])
+    cause=str(last_error or '').strip()
+    if not cause:
+        cause=(f'No valid JSON after {attempt_limit} attempts; last done_reason='
+               f'{finish_reason or "unknown"}, response_chars={content_chars}, '
+               f'thinking_chars={reasoning_chars}, num_ctx={num_ctx}, '
+               f'num_predict={output_budget}. Likely truncated output or '
+               'structured-format incompatibility.')
+    raise RuntimeError(f'Ollama {model}: {attempt_limit} attempts exhausted. '
+                       f'{cause[:360]} | Try shorter prompts or '
+                       'BRAIN_REVIEW_MODEL=qwen2.5:3b for a smaller local model.')
 
 
 def flin_ollama_parallelism():
@@ -7032,14 +7042,16 @@ def _question_payload_diagnostic(payload):
 # Ask for a FLAT object when requesting exactly one question.  The former
 # {"questions":[{...}]} nesting unnecessarily reduced format reliability.
 ONE_QUESTION_SCHEMA = {
-    'type':'object',
+    'type': 'object',
     'properties': {
-        **{k:{'type':'string'} for k in ('title','formal_objects','assumptions',
-                                        'question','approach','gaps','motivation')},
-        'evidence_ids':{'type':'array','items':{'type':'string'}},
+        **{k: {'type': 'string'} for k in (
+            'title', 'formal_objects', 'assumptions', 'question',
+            'approach', 'gaps', 'motivation')},
+        'evidence_ids': {'type': 'array', 'items': {'type': 'string'}},
     },
-    'required':['title','formal_objects','assumptions','question',
-                'approach','evidence_ids','gaps','motivation'],
+    # The model must focus on a well-defined question rather than fill eight
+    # long mandatory prose fields.  Optional fields stay in the saved payload.
+    'required': ['title', 'formal_objects', 'assumptions', 'question'],
 }
 
 
@@ -7105,7 +7117,7 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
     different JSON shape, normalize it; when essential mathematical content
     is missing, request ONE repair before falling back to another model.
     """
-    context_data=compact_question_evidence(context,paths,max_chars=1400)
+    context_data=compact_question_evidence(context,paths,max_chars=1100)
     allowed=({str(r.get('ref','')) for r in context_data['claims']} |
              {str(r.get('ref','')) for r in context_data['source_quotes']})- {''}
     taken={str(x).casefold().strip() for x in existing_titles}
@@ -7126,9 +7138,11 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
             'Generate exactly ONE question as a flat JSON object, not a questions array. Example: '
             '{"title":"Concise title", "formal_objects":"Precisely defined objects and notation", '
             '"assumptions":"Explicit assumptions", "question":"A specific, provable or refutable proposition", '
-            '"approach":"Possible method", "evidence_ids":[], "gaps":"What remains unverified", '
-            '"motivation":"Research motivation"}. '
-            'The formal_objects and question fields must be substantive, not empty or keyword-only. '
+            '"evidence_ids":[]}. '
+            'Required: title, formal_objects, assumptions, question. '
+            'Optional: approach, gaps, motivation, evidence_ids. '
+            'Keep the question to ONE falsifiable proposition, 25-65 English words; '
+            'put only essential mathematical notation in formal_objects and assumptions. '
         )
     else:
         format_instruction=(
@@ -7147,7 +7161,9 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
         'Use evidence_ids such as S1 or R1 only for claims directly supported by the corresponding supplied evidence. '
         'A source excerpt is not itself a mathematical proof. '
         'Use an empty evidence_ids list when no verified source identifier applies, and explain the limitation in gaps. '
-        'Write substantial field values (approximately 20-90 words when appropriate), never empty placeholders. '
+        'Be precise and economical: question 25-65 English words, title <= 10 words, '
+        'formal_objects and assumptions <= 45 words each; optional method/gap <= 25 words. '
+        'Do not repeat the context, citations or critique inside the question. '
         +focus+'Previously generated questions, which must not be duplicated: '
         +json.dumps(list(existing_titles)[-6:],ensure_ascii=False)+'. '
         +format_instruction+'\nRetrieved memory network: '+json.dumps(context_data,ensure_ascii=False)
@@ -7162,7 +7178,7 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
         return output
     def ask(text, *,repair=False):
         return ollama_json(
-            model,text,num_predict=800 if single else 1200,
+            model,text,num_predict=650 if single else 1000,
             timeout=max(60,min(900,int(os.environ.get('BRAIN_OLLAMA_TIMEOUT','150')))),
             progress=progress,cancel_event=cancel_event,think=False,
             response_schema=ONE_QUESTION_SCHEMA if single else None,
@@ -7358,17 +7374,17 @@ def judge_question(model, question, context, *, prior_question=None,
     Scores are heuristic.  Numerical gains alone MUST NOT approve a version
     that introduces an error, removes essential hypotheses or loses provenance.
     """
-    compact={k:str(question.get(k,''))[:430] for k in
+    compact={k:str(question.get(k,''))[:280] for k in
              ('title','formal_objects','assumptions','question','gaps','approach')}
     compact['evidence_ids']=question.get('evidence_ids',[])[:10]
-    evidence=compact_question_evidence(context,[],max_chars=850)
+    evidence=compact_question_evidence(context,[],max_chars=550)
     version_context=''
     schema=JUDGE_SCHEMA
     if prior_question is not None:
         structural=_version_changes(prior_question,question)
-        old={key:_question_text(prior_question.get(key,''))[:270] for key in
+        old={key:_question_text(prior_question.get(key,''))[:180] for key in
              ('formal_objects','assumptions','question')}
-        prior_note=str((prior_review or {}).get('critique',''))[:220]
+        prior_note=str((prior_review or {}).get('critique',''))[:140]
         version_context=(
             '\nPrevious research core: '+json.dumps(old,ensure_ascii=False)+
             '\nPrevious review findings: '+prior_note+
@@ -7390,13 +7406,13 @@ def judge_question(model, question, context, *, prior_question=None,
         'Reduce the depth score for a mere restatement of a known result and reduce the evidence score for unsupported claims. '
         'Check definitions, notation, quantifiers, necessary and sufficient assumptions, prior results, '
         'feasible proofs or counterexamples, and the validity of proposed cross-field mappings. '
-        'In critique, provide one to three concrete, immediately actionable changes (about 40-130 words). '
+        'In critique, give up to TWO specific corrections, at most 45 English words total. '
         'Do not use vague praise or empty suggestions even when the score is high. '
         'Return only JSON containing rubric (formal_objects, assumptions, decidability, evidence, depth), '
         'critique, verifiable (Boolean), and delta when reviewing a revision. '
         '\nCurrent question: '+json.dumps(compact,ensure_ascii=False)+
         '\nCited evidence: '+json.dumps(evidence,ensure_ascii=False)+version_context)
-    obj=ollama_json(model,prompt,num_predict=850 if prior_question is not None else 650,
+    obj=ollama_json(model,prompt,num_predict=700 if prior_question is not None else 500,
                     timeout=max(90,min(900,int(os.environ.get('BRAIN_JUDGE_TIMEOUT','180')))),
                     response_schema=schema,progress=progress,
                     cancel_event=cancel_event,think=False)
@@ -7414,7 +7430,7 @@ def judge_question(model, question, context, *, prior_question=None,
     if obj.get('verifiable') is not True:
         score=min(score,70)
     review={'rubric':grades,'score':score,
-            'critique':str(obj.get('critique',''))[:600],
+            'critique':str(obj.get('critique',''))[:380],
             'verifiable':obj.get('verifiable') is True}
     if prior_question is not None:
         review['difference']=_validated_delta(obj,structural)
@@ -7425,17 +7441,28 @@ def judge_question(model, question, context, *, prior_question=None,
 
 
 def quick_critic_from_review(verdict):
-    """Reuse the judge's already-generated actionable comments: zero LLM calls.
+    """Use the judge's concise feedback instead of a second model call.
 
-    An independent critic can still be explicitly enabled with
-    BRAIN_USE_SEPARATE_CRITIC=1, or used if this feedback is empty.
+    One serial Ollama request should normally supply both a score and the
+    actionable criticism. When it omits useful criticism, choose an explicit
+    *rubric-based instruction*, not an invented statement about the evidence.
     """
     comment=str(verdict.get('critique') or '').strip()
-    if len(comment)>=24 and any(t in comment for t in
-           (' Assumptions ',' define meaning ',' proposition ',' Evidence ',' Conditions ',' revise correct ',' add missing ',' supplement ',' clear confirm ',' change for ',
-            'specify','assumption','define','clarify','evidence','proof')):
-        return comment[:450]
-    return None
+    if len(comment)>=12:
+        return comment[:250]
+    rubric=verdict.get('rubric') or {}
+    guidance={
+        'formal_objects': 'Define the exact mathematical objects, notation and domains.',
+        'assumptions': 'State necessary hypotheses, including applicable limits.',
+        'decidability': 'State one proposition that admits a proof or counterexample.',
+        'evidence': 'Separate source evidence from unproven mathematical claims.',
+        'depth': 'Formulate a nontrivial, testable mathematical problem.',
+    }
+    ranked=[k for k in guidance if k in rubric]
+    if ranked:
+        weak=min(ranked,key=lambda k:float(rubric.get(k) or 0))
+        return guidance[weak]
+    return 'Specify mathematical objects, assumptions, and one testable proposition.'
 
 
 def critique_question(model,question,assessment, *, progress=None,cancel_event=None):
@@ -7447,11 +7474,11 @@ def critique_question(model,question,assessment, *, progress=None,cancel_event=N
             'critique':str(assessment.get('critique',''))[:470]}
     prompt=('You are a mathematical research critic. Suggest only actionable corrections. '
             'Do not invent references or claim a proof has been established. Return only JSON: '
-            '{"suggestions":"In at most 120 words, identify definitions, assumptions, propositions or evidence to fix", '
+            '{"suggestions":"In at most 40 words, name the exact mathematical correction", '
             '"priority":"The single most important correction"}. '
             '\nQuestion: '+json.dumps(compact,ensure_ascii=False)+
             '\nReview: '+json.dumps(review,ensure_ascii=False))
-    obj=ollama_json(model,prompt,num_predict=450,timeout=160,
+    obj=ollama_json(model,prompt,num_predict=280,timeout=160,
                     response_schema=CRITIC_SCHEMA,think=False,
                     progress=progress,cancel_event=cancel_event)
     suggestions=str(obj.get('suggestions','')).strip()[:1300]
@@ -7470,9 +7497,6 @@ REVISION_PATCH_SCHEMA = {
         'question': {'type': 'string'},
         'assumptions': {'type': 'string'},
         'formal_objects': {'type': 'string'},
-        'title': {'type': 'string'},
-        'approach': {'type': 'string'},
-        'gaps': {'type': 'string'},
     },
     'required': ['question'],
 }
@@ -7537,62 +7561,70 @@ def _merge_question_revision(old, updates, context):
     return merged
 
 
-def revise_question(model, old, assessment, critique, context, *, progress=None,cancel_event=None):
-    """Revise ONLY the mathematical changes; merge them into saved old version.
+def revise_question(model, old, assessment, critique, context, *, progress=None, cancel_event=None):
+    """Make a compact, evidence-preserving patch, never regenerate an essay.
 
-    Qwen 3B/4B regularly omitted unchanged fields or exhausted num_predict
-    rewriting the whole question. A compact patch fits much better on 4GB VRAM.
-    Each attempt remains evidence-based and cannot silently bypass validation.
+    Leave unmodified metadata from the persisted previous candidate. A failed
+    JSON patch never overwrites that candidate; the caller can use its last
+    evaluated and mathematically acceptable version instead.
     """
-    old_compact={k:_question_text(old.get(k,''))[:620] for k in
-                 ('title','formal_objects','assumptions','question','approach','gaps')}
-    rubric=assessment.get('rubric') or {}
-    review={'score':assessment.get('score'),
-            'rubric':{str(k):v for k,v in rubric.items()} if isinstance(rubric,dict) else {},
-            'critique':str(assessment.get('critique',''))[:320]}
-    evidence=compact_question_evidence(context,[],max_chars=640)
-    # Only first 2 concise claims are useful for a localized patch.
+    old_core={key:_question_text(old.get(key,''))[:340 if key=='question' else 220]
+              for key in ('formal_objects','assumptions','question')}
+    critique_text=str(critique or assessment.get('critique') or '')[:260]
+    evidence=compact_question_evidence(context, [], max_chars=460)
     evidence['claims']=evidence.get('claims',[])[:2]
-    missing_assumptions=not _question_text(old.get('assumptions'))
-    instructions=(
-        'Task: fix each deficiency from the previous mathematical review without changing the core mathematical '
-        'objects or supported cross-disciplinary mapping. This is a revision, not a new question. '
-        'Return a JSON object only; unchanged fields need not be repeated. '
-        'You must return question with a specific, provable or refutable revised proposition (about 40-160 words). '
-        'Return assumptions and/or formal_objects as complete revised fields when needed. '
-        'Include title, approach, and gaps only if they require changes. '
-        'Do not fabricate sources, presume the claim has been proved, or remove conditions, definitions, '
-        'measurements, or evidence limitations necessary for validity. '
-        'Keep the revision incremental, with no duplicated full previous question or lengthy explanation. '
-        +('The original question has no assumptions: include assumptions in this revision. ' if missing_assumptions else ''))
-    prompt=('Research domain: '+domain_name()+'. Evaluation criteria: '+domain_review_guide()+'. '
-            +instructions+'\nPrevious question summary: '+json.dumps(old_compact,ensure_ascii=False)+
-            '\nReview: '+json.dumps(review,ensure_ascii=False)+
-            '\nPriority changes: '+str(critique)[:470]+
-            '\nTraceable candidate evidence: '+json.dumps(evidence,ensure_ascii=False))
+    prompt=(
+        'Revise ONE mathematical proposition to address the critic. '
+        'Output only a JSON object with question and, ONLY when necessary, '
+        'assumptions or formal_objects. No title, preamble, proof, essay or citations. '
+        'The question must be ONE precise provable/refutable statement (25-65 English words). '
+        'Retain essential quantifiers, definitions, mathematical conditions, and limits. '
+        'Never assert a theorem as established without evidence or invent a source. '
+        'If correction needs a change to assumptions or notation, return that complete '
+        'field, at most 45 words. Otherwise omit unchanged fields. '
+        '\nCurrent proposition: '+json.dumps(old_core,ensure_ascii=False,separators=(',',':'))+
+        '\nCorrect these issues: '+critique_text+
+        '\nSource hints (NOT proofs): '+json.dumps(evidence,ensure_ascii=False,separators=(',',':'))
+    )
     last_error=None
-    # Second attempt is a targeted format/meaning repair, not an unlimited
-    # retry that silently consumes multiple minutes per question.
     for attempt in range(2):
         if cancel_event is not None and cancel_event.is_set():
-            raise InterruptedError(' already Stop Evaluation ; before Completed question retain .')
+            raise InterruptedError('Review cancelled; last saved question is unchanged.')
         if progress:
-            progress((' incremental Revision research proposition ' if attempt==0 else ' Repair this questions Revision Content ')+
-                     ': reuse NOT change field , reduce few  JSON  Output long degrees ')
-        correction=('\n previous Revision question :'+str(last_error)[:190]+
-                    '. this imes must Output  JSON question  field , and at least modify one substantive item research Content .'
-                    if attempt else '')
-        raw=ollama_json(model,prompt+correction,
-                        num_predict=850,timeout=max(90,min(600,int(os.environ.get('BRAIN_REVISION_TIMEOUT','210')))),
-                        response_schema=REVISION_PATCH_SCHEMA,think=False,
-                        progress=progress,cancel_event=cancel_event)
+            progress(f'Compact mathematical revision {attempt+1}/2: JSON proposition patch.')
+        if attempt:
+            # A second request must be SHORTER, not the same long prompt plus
+            # another block of instructions which consumes even more context.
+            request=(
+                'Return ONLY JSON: {"question":"one corrected precise mathematical '
+                'proposition","assumptions":"changed conditions if needed"}. '
+                'Question 25-65 words, retain necessary mathematical definitions. '
+                '\nPrevious: '+json.dumps(old_core,ensure_ascii=False,separators=(',',':'))+
+                '\nFix: '+critique_text[:190]
+            )
+        else:
+            request=prompt
         try:
+            raw=ollama_json(model,request,num_predict=650 if not attempt else 500,
+                timeout=max(90,min(600,int(os.environ.get('BRAIN_REVISION_TIMEOUT','210')))),
+                response_schema=REVISION_PATCH_SCHEMA,think=False,
+                progress=progress,cancel_event=cancel_event)
             updates=_revision_patch(raw)
             return _merge_question_revision(old,updates,context)
-        except (ValueError,TypeError) as exc:
+        except InterruptedError:
+            raise
+        except (RuntimeError,ValueError,TypeError) as exc:
             last_error=exc
-            if progress:progress('⚠  Revision format / Content Validate failed validation :'+str(exc)[:180])
-    raise ValueError(' research Revision two imes failed validation Validate :'+str(last_error))
+            if progress:
+                progress('Revision attempt failed; saved candidate preserved: '+str(exc)[:220])
+            # Retrying a dead Ollama service is not a format repair and would
+            # delay the next question by another timeout.
+            if isinstance(exc,RuntimeError) and any(k in str(exc).casefold() for k in
+                    ('unable to connect', 'communication failed', 'http 500',
+                     'http 503', 'long time no', 'ollama connection')):
+                break
+    raise RuntimeError('Compact revision could not be completed; previous evaluated '
+                       'question preserved. Last error: '+str(last_error)[:340])
 
 
 def store_candidate(con,set_id,slot,content,model):
@@ -10969,7 +11001,11 @@ class NetworkWindow:
                             with database() as con:
                                 with con:save_feedback(con,cid,'revision_error',None,
                                     str(exc)[:900],model='ollama')
-                            raise
+                            self.events.put(('v7_iteration_progress', (set_id,
+                                f'Question {slot}/{target_count}: revision failed; '
+                                'retaining previous evaluated question and continuing. '
+                                +str(exc)[:180])))
+                            break  # safe: current candidate already has an evaluator verdict
                         with database() as con:
                             with con:store_candidate(con,set_id,slot,revised,used)
                         self.events.put(('v7_iteration_update',(set_id,slot,None)))
@@ -12389,9 +12425,17 @@ class NetworkWindow:
                     self.update_question_window(set_id)
                     state=self.question_windows.get(set_id)
                     if state:
-                        state['status'].set(('✓  All requested questions already passedModelreview and Revision , currently only Display score most best final version .') if finished else
-                            ('✕  iterate Failed ; draft still hide , can click resumeReview:'+error[:300] if error else
-                             f'■ Reviewnot yet All Completed ({reviewed}/{get_question_count(set_id)}); already save but NOT Display draft , can resume .'))
+                        with database() as con:
+                            revision_errors=int(con.execute('''SELECT COUNT(*) FROM question_feedback f
+                                JOIN question_candidates q ON q.id=f.candidate_id
+                                WHERE q.set_id=? AND f.role='revision_error' ''' ,(set_id,)).fetchone()[0])
+                        if finished:
+                            note=(f' ({revision_errors} failed revision attempts logged; earlier evaluated '
+                                  'versions retained.)' if revision_errors else '')
+                            state['status'].set('✓ Review evaluations saved; best accepted recorded versions selected.'+note)
+                        else:
+                            state['status'].set('✕ Review stopped; saved questions can be resumed: '+error[:300] if error else
+                                f'■ Review incomplete ({reviewed}/{get_question_count(set_id)}); saved state retained.')
                         if error:messagebox.showerror('ModelEvaluation iterate Failed ',error[:1100],parent=state['win'])
                 elif kind == "done":
                     self._collector_completion_observed = True
