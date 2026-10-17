@@ -41,7 +41,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -6574,7 +6574,10 @@ QUESTION_RUBRIC = {
 def requested_question_topics(context):
     raw=str(context.get('query','') or '').strip()
     parts=[v.strip().strip('\"\' ') for v in re.split(r'[,，、;；\n]+',raw)]
-    return list(dict.fromkeys(v for v in parts if v))[:8]
+    # Never silently drop a requested discipline (the old [:8] did exactly that).
+    # Every topic is evaluated separately, so response length remains bounded
+    # even when the user supplies many disciplines.
+    return list(dict.fromkeys(v for v in parts if v))
 
 
 def _topic_alignment_pass(report, required):
@@ -6598,69 +6601,142 @@ def _topic_alignment_missing(report, required):
                and len(str(found[canonical_phrase(t)].get('role','')).strip())>=8)]
 
 
-TOPIC_ALIGNMENT_SCHEMA = {
-    'type':'object', 'properties':{
-        'coverage':{'type':'array','items':{'type':'object','properties':{
-            'topic':{'type':'string'},'present':{'type':'boolean'},'role':{'type':'string'}},
-            'required':['topic','present','role']}},
-        'linkage_score':{'type':'integer'}, 'linkage':{'type':'string'}, 'issues':{'type':'string'}},
-    'required':['coverage','linkage_score','linkage','issues']}
+# Separate topic identity and mathematical role checks from the much smaller
+# cross-topic integration verdict. One Ollama call NEVER has to list N topics.
+# This also supports a single topic without falsely requiring interdisciplinarity.
+TOPIC_UNIT_SCHEMA = {
+    'type':'object','additionalProperties':False,
+    'properties':{
+        'present':{'type':'boolean'},
+        'role':{'type':'string','maxLength':150},
+        'reason':{'type':'string','maxLength':130}},
+    'required':['present','role','reason'],
+}
+TOPIC_LINK_SCHEMA = {
+    'type':'object','additionalProperties':False,
+    'properties':{
+        'linkage_score':{'type':'integer','minimum':0,'maximum':20},
+        'linkage':{'type':'string','maxLength':170},
+        'issues':{'type':'string','maxLength':145}},
+    'required':['linkage_score','linkage','issues'],
+}
+# Preserve the old schema name for integrations which inspect it, but never
+# request the verbose all-topics JSON object from the model again.
+TOPIC_ALIGNMENT_SCHEMA = TOPIC_LINK_SCHEMA
+
+
+def _topic_review_core(question):
+    return {field:str(question.get(field,'') or '')[:420]
+            for field in ('title','formal_objects','assumptions','question')}
+
+
+def _review_topic_unit(model, topic, question_core, *, progress=None,
+                       cancel_event=None, index=1, total=1):
+    if progress:
+        progress(f'Topic evidence {index}/{total}: {str(topic)[:65]}')
+    prompt=(
+        'Assess exactly ONE requested mathematical subject against the actual '
+        'research question. A topic is present ONLY if it contributes a '
+        'specific defined mathematical object, parameter, function, operation, '
+        'assumption or equation necessary to the proposition. Merely naming '
+        'the field or mentioning an analogy is NOT evidence. Be skeptical. '
+        'Return a SINGLE tiny JSON object: present boolean, role (one concrete '
+        'mathematical role, <= 18 words), reason (one defect or evidence, <= 16 '
+        'words). Do not repeat the question, prove it, or write a paragraph. '
+        '\nRequested topic: '+json.dumps(topic,ensure_ascii=False)+
+        '\nResearch proposition: '+json.dumps(question_core,ensure_ascii=False,separators=(',',':')))
+    response=ollama_json(model,prompt,num_predict=240,
+        timeout=max(90,min(900,int(os.environ.get('BRAIN_TOPIC_REVIEW_TIMEOUT','210')))),
+        response_schema=TOPIC_UNIT_SCHEMA,think=False,progress=progress,
+        cancel_event=cancel_event)
+    if not isinstance(response,dict) or type(response.get('present')) is not bool:
+        raise ValueError('Incomplete topic-role review; no topic is presumed present.')
+    role=str(response.get('role') or '').strip()[:150]
+    return {'topic':topic,
+            'present':response['present'] is True and len(role)>=8,
+            'role':role if role else 'Mathematical role not established',
+            'reason':str(response.get('reason') or '')[:130]}
+
+
+def _review_topic_links(model, topics_and_roles, question_core, *, single=False,
+                        progress=None,cancel_event=None,part=1,parts=1):
+    if progress:
+        progress(('Single-topic mathematical relevance' if single else
+                  f'Cross-topic mathematical linkage {part}/{parts}'))
+    compact=[{'topic':x['topic'],'role':str(x['role'])[:125]}
+             for x in topics_and_roles]
+    prompt=(
+        ('Score substantive relevance within the ONE requested subject. ' if single
+         else 'Score actual mathematical integration across ALL the requested '
+              'subjects shown here. Mere coexistence is not integration; '
+              'require shared mathematical objects, constraints, functional '
+              'dependencies, equations or explicit model mappings. ') +
+        'Return ONLY a tiny JSON object with linkage_score integer 0..20, '
+        'linkage one specific mathematical connection (<= 22 words), and '
+        'issues one concrete defect (<= 16 words). Score 12+ ONLY when '
+        'the mathematical integration/relevance is genuinely established. '
+        'No proof, no essays, no additional keys. '
+        '\nRequested subjects and their independently reviewed roles: '+
+        json.dumps(compact,ensure_ascii=False,separators=(',',':'))+
+        '\nQuestion: '+json.dumps(question_core,ensure_ascii=False,separators=(',',':')))
+    response=ollama_json(model,prompt,num_predict=260,
+        timeout=max(90,min(900,int(os.environ.get('BRAIN_TOPIC_REVIEW_TIMEOUT','210')))),
+        response_schema=TOPIC_LINK_SCHEMA,think=False,progress=progress,
+        cancel_event=cancel_event)
+    if not isinstance(response,dict) or type(response.get('linkage_score')) is not int:
+        raise ValueError('Missing integration score; subject linkage not established.')
+    return {'linkage_score':max(0,min(20,response['linkage_score'])),
+            'linkage':str(response.get('linkage') or '')[:170],
+            'issues':str(response.get('issues') or '')[:145]}
 
 
 def evaluate_question_topic_alignment(model, question, context, *,
                                       progress=None, cancel_event=None):
-    '''Focused second-model call: each requested subject must contribute real math.
+    """Review ALL user-specified subjects, including 1 or >8 topics.
 
-    A domain name merely appearing in the title is not substantive coverage.
-    This report is an LLM assessment, NOT independently established validity.
-    '''
+    Unlike a single long model-generated coverage array, each topic is checked
+    independently and the multi-topic graph is evaluated in overlapping groups
+    of at most six subjects. The LOWEST group score bounds the overall score.
+    A cross-group bridge is required by overlapping one topic between groups.
+    This is an LLM assessment, not a mathematical proof.
+    """
     required=requested_question_topics(context)
     if not required:
-        return {'coverage':[], 'linkage_score':20, 'linkage':'No explicit topics',
-                'issues':'', 'passed':True, 'missing':[]}
-    core={key:str(question.get(key,'') or '')[:350] for key in
-          ('title','formal_objects','assumptions','question')}
-    prompt=(
-        'You are an independent mathematical TOPIC ALIGNMENT reviewer. '
-        'User explicitly requested these subjects: '+json.dumps(required,ensure_ascii=False)+'. '
-        'For EACH subject, return one entry with the EXACT topic text, boolean present, '
-        'and a concise role (8-35 words) explaining which defined mathematical object or '
-        'operation it contributes. present=false if it is absent, name-dropped, or a mere analogy. '
-        'For FINANCE, require a financial quantity/model such as asset returns, portfolio '
-        'weights/risk, pricing, or hedging, not just a generic gradient. '
-        'For multiple subjects, check a meaningful INTERACTION (shared variables, '
-        'assumptions, equations, or explicit mapping); co-occurrence alone scores 0. '
-        'For one subject, assess mathematical relevance rather than cross-field linkage. '
-        'Give linkage_score 0..20 (12+ only for substantive multi-topic linkage, '
-        'or single-topic mathematical relevance), linkage <= 35 words, issues <= 30 words. '
-        'Do not invent subject roles or claim a connection without a defined mapping. '
-        'Return ONLY JSON following the schema.\nQuestion: '+
-        json.dumps(core,ensure_ascii=False,separators=(',',':')))
-    if progress:progress('Independent topic-alignment review: '+', '.join(required))
-    obj=ollama_json(model,prompt,num_predict=650,
-        timeout=max(90,min(900,int(os.environ.get('BRAIN_TOPIC_REVIEW_TIMEOUT','210')))),
-        response_schema=TOPIC_ALIGNMENT_SCHEMA,think=False,
-        progress=progress,cancel_event=cancel_event)
-    raw=obj.get('coverage',[]) if isinstance(obj,dict) else []
-    records=[];seen=set()
-    for entry in raw if isinstance(raw,list) else []:
-        if not isinstance(entry,dict):continue
-        key=canonical_phrase(entry.get('topic',''))
-        matched=next((t for t in required if canonical_phrase(t)==key),None)
-        if matched is None or key in seen:continue
-        seen.add(key)
-        role=str(entry.get('role','') or '').strip()[:230]
-        records.append({'topic':matched,'present':entry.get('present') is True
-                        and len(role)>=8,'role':role})
-    # Explicitly include every subject that the model omitted from its reply.
-    for t in required:
-        if canonical_phrase(t) not in seen:
-            records.append({'topic':t,'present':False,'role':'Not assessed by model'})
-    score=max(0,min(20,int(obj.get('linkage_score') or 0)))
+        return {'coverage':[], 'linkage_score':20,'linkage':'No explicit topics',
+                'issues':'','passed':True,'missing':[], 'linkage_checks':[]}
+    core=_topic_review_core(question)
+    records=[_review_topic_unit(model,t,core,progress=progress,
+                cancel_event=cancel_event,index=i,total=len(required))
+             for i,t in enumerate(required,1)]
+    missing=_topic_alignment_missing({'coverage':records},required)
+    # A linkage judgment should not compensate for an absent required subject.
+    # Still check the mathematical relationship among the present subjects to
+    # provide actionable revision guidance rather than an arbitrary zero.
+    present=[r for r in records if r['present']]
+    groups=[]
+    if len(present)==1:
+        groups=[present]
+    elif len(present)>1:
+        # Adjacent groups overlap by one independently verified topic: for N
+        # topics each mathematical-linkage request stays bounded in size.
+        for start in range(0,len(present)-1,5):
+            section=present[start:start+6]
+            if len(section)>=2:groups.append(section)
+    checks=[_review_topic_links(model,g,core,single=len(required)==1,
+                 progress=progress,cancel_event=cancel_event,part=i,parts=len(groups))
+            for i,g in enumerate(groups,1)]
+    score=min([v['linkage_score'] for v in checks],default=0)
+    if missing:
+        score=min(score,8)
+    # Do not label an absent (or unavailable) subject as substantively linked.
+    issues='; '.join(x['topic']+': '+str(x.get('reason','')) for x in records
+                     if not x['present'])[:350]
+    if checks:
+        issues='; '.join(filter(None,[issues]+[c['issues'] for c in checks]))[:480]
     report={'coverage':records,'linkage_score':score,
-            'linkage':str(obj.get('linkage','') or '')[:240],
-            'issues':str(obj.get('issues','') or '')[:210]}
-    report['missing']=_topic_alignment_missing(report,required)
+            'linkage':' | '.join(c['linkage'] for c in checks)[:500],
+            'issues':issues,'missing':missing,'linkage_checks':checks,
+            'requested_topics':required}
     report['passed']=_topic_alignment_pass(report,required)
     return report
 
@@ -6809,6 +6885,62 @@ def _reduce_model_prompt(prompt,ratio=.7):
     return prompt
 
 
+def _bounded_review_response_chars(schema):
+    """Only rigid small-review schemas get hard response caps.
+
+    Draft generators are intentionally excluded; an entire question object
+    naturally needs more text than a binary topic or numerical grade.
+    """
+    if not isinstance(schema,dict) or schema.get('additionalProperties') is not False:
+        return 0
+    props=schema.get('properties',{})
+    if 'title' in props and 'formal_objects' in props:return 0
+    if 'question' in props and 'assumptions' in props:return 2600
+    if 'rubric' in props:return 2100
+    if 'score' in props:return 950
+    if 'delta' in props:return 1450
+    if 'present' in props:return 950
+    if 'linkage_score' in props:return 1000
+    return 1800
+
+
+def _validate_review_json(value, schema, path='$'):
+    """Validate only compact review schemas, independent of Ollama promises.
+
+    Model responses never get a passing grade by merely being parseable JSON.
+    This intentionally does not police historical draft formats/field aliases.
+    """
+    if not isinstance(schema,dict):return
+    kind=schema.get('type')
+    if kind=='object':
+        if not isinstance(value,dict):raise ValueError(path+' must be an object')
+        required=schema.get('required',[])
+        absent=[k for k in required if k not in value]
+        if absent:raise ValueError(path+' missing '+', '.join(absent))
+        props=schema.get('properties',{})
+        if schema.get('additionalProperties') is False:
+            extras=set(value)-set(props)
+            if extras:raise ValueError(path+' unexpected fields '+', '.join(sorted(extras)[:4]))
+        for key,item in value.items():
+            if key in props:_validate_review_json(item,props[key],path+'.'+key)
+    elif kind=='array':
+        if not isinstance(value,list):raise ValueError(path+' must be a list')
+        if len(value)>schema.get('maxItems',1000000):
+            raise ValueError(path+' has too many entries')
+        for i,item in enumerate(value):
+            _validate_review_json(item,schema.get('items',{}),path+f'[{i}]')
+    elif kind=='boolean':
+        if type(value) is not bool:raise ValueError(path+' must be a boolean')
+    elif kind=='integer':
+        if type(value) is not int:raise ValueError(path+' must be an integer')
+        if not schema.get('minimum',float('-inf'))<=value<=schema.get('maximum',float('inf')):
+            raise ValueError(path+' outside scoring range')
+    elif kind=='string':
+        if not isinstance(value,str):raise ValueError(path+' must be a string')
+        if len(value)>schema.get('maxLength',1000000):
+            raise ValueError(path+' exceeds maxLength')
+
+
 def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                 progress=None, cancel_event=None, think=False, response_schema=None):
     """Incremental Ollama JSON with context enlargement and explicit errors.
@@ -6834,13 +6966,19 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
         max_predict=3072
     output_budget=min(max_predict,max(128,int(num_predict)))
     active_schema=response_schema
+    response_char_cap=_bounded_review_response_chars(response_schema)
+    # These checks are deliberately disabled for free-form question creation.
+    # A compact reviewer should never be allowed to produce 10k characters.
+    if response_char_cap:
+        output_budget=min(output_budget,800)
     supports_think=True
     # Number of attempted requests is bounded even if the model repeatedly
     # rejects a response. No silent fallback to another model.
     try:
-        attempt_limit = max(1,min(7,int(os.environ.get('BRAIN_OLLAMA_MAX_ATTEMPTS','3'))))
+        attempt_limit = max(1,min(7,int(os.environ.get('BRAIN_OLLAMA_MAX_ATTEMPTS',
+                                         '4' if response_char_cap else '3'))))
     except ValueError:
-        attempt_limit = 3
+        attempt_limit = 4 if response_char_cap else 3
     for attempt in range(attempt_limit):
         if cancel_event is not None and cancel_event.is_set():
             raise InterruptedError(' already Stop Generate ; Completed questions items retain .')
@@ -6857,6 +6995,7 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
         sess=requests.Session();sess.trust_env=False
         accumulated=[];reasoning_chars=0;content_chars=0;finish_reason=''
         started=time.monotonic();last_update=0.0;context_retry=False;schema_retry=False;think_retry=False;length_retry=False
+        validation_retry=False
         try:
             with sess.post('http://127.0.0.1:11434/api/chat',json=payload,
                            stream=True,timeout=(8,80)) as r:
@@ -6897,6 +7036,20 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                         content=str(message.get('content') or data.get('response') or '')
                         reasoning_chars+=len(reasoning);content_chars+=len(content)
                         if content:accumulated.append(content)
+                        # Abort runaway structured review responses *before* 10k
+                        # tokens/characters have been generated. Closing the
+                        # streamed response also releases the Ollama request.
+                        if response_char_cap and content_chars>response_char_cap:
+                            last_error=(f'Review JSON exceeded {response_char_cap} characters '
+                                        f'without completing; model ignored compact schema.')
+                            length_retry=True
+                            if progress:progress('Review JSON too verbose; cancelling output '
+                                                 'and retrying with strict compact format.')
+                            break
+                        if response_char_cap and reasoning_chars>12000:
+                            last_error='Review model produced excessive internal reasoning despite think=false.'
+                            length_retry=True
+                            break
                         now=time.monotonic()
                         if progress and now-last_update>=1.5:
                             phase=' Output  JSON' if content_chars else 'Modelthinking / load '
@@ -6905,7 +7058,7 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                         if data.get('done'):
                             finish_reason=str(data.get('done_reason') or '')
                             break
-            if not context_retry and not schema_retry and not think_retry:
+            if not context_retry and not schema_retry and not think_retry and not length_retry:
                 raw=''.join(accumulated).strip()
                 if progress:progress(f' response Completed :{time.monotonic()-started:.0f}s / {len(raw)}  characters ')
                 if not raw:
@@ -6913,6 +7066,8 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                         ' or update  Ollama.' if reasoning_chars else 'Ollama  not yet generate question Content .')
                 try:
                     parsed=_decode_model_json(raw)
+                    if response_char_cap:
+                        _validate_review_json(parsed,response_schema)
                     return parsed
                 except ValueError as exc:
                     last_error=f'JSON parse failed: {exc}; done_reason={finish_reason or "unknown"}; output_chars={len(raw)}'
@@ -6923,24 +7078,29 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                         (raw.rstrip()[-1:] not in ('}',']') or
                          raw.count('"')%2 or raw.count('{')>raw.count('}') or
                          raw.count('[')>raw.count(']')))
-                    if finish_reason in ('length','max_tokens','token_limit') or incomplete_json:
+                    if response_char_cap:
+                        # Never respond to a runaway review by blindly raising
+                        # its token allowance to 3072/4096. Retry the SAME
+                        # mathematical assessment with a stricter bounded JSON
+                        # request and a modest quota; missing fields fail closed.
+                        length_retry=True
+                        output_budget=min(800,max(output_budget,600))
+                        if progress:progress('Review response invalid/truncated; '
+                                             'retrying compact JSON only: '+str(exc)[:120])
+                    elif finish_reason in ('length','max_tokens','token_limit') or incomplete_json:
                         if output_budget<max_predict:
                             output_budget=min(max_predict,max(output_budget+350,int(output_budget*1.75)))
                             length_retry=True
                             if progress:progress(
                                 f'⚠ JSON  was Output maximum truncate ; automatic increase per-response imes response quota to  {output_budget} tokens  and Retry .')
                         else:
-                            # Retry once with a briefer instruction, instead of
-                            # aborting 10-question review for a format-only error.
                             smaller=_reduce_model_prompt(working_prompt,.65)
                             if len(smaller)<len(working_prompt):
                                 working_prompt=smaller
                                 length_retry=True
-                                if progress:progress('⚠  already reached Output maximum ; shorten nonessential cores Background after Retry .')
                             else:
                                 raise RuntimeError(
-                                    f'JSON  keeps being truncated ( maximum  {output_budget} tokens).'
-                                    ' CheckModelor Settings  BRAIN_MAX_NUM_PREDICT=4096.') from exc
+                                    f'JSON  keeps being truncated ( maximum  {output_budget} tokens).') from exc
                     else:
                         raise RuntimeError('Modelresponse  JSON  Unable to parse :'+str(exc)[:260]) from exc
         except requests.exceptions.ConnectionError as exc:
@@ -6950,6 +7110,14 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
         except requests.exceptions.RequestException as exc:
             raise RuntimeError('Ollama  communication Failed :'+str(exc)[:240]) from exc
         finally:sess.close()
+        if response_char_cap and length_retry:
+            # Preserve the complete proposition. Never truncate its hypotheses
+            # as a 'repair' for verbose JSON. Just reinforce output format.
+            if attempt==0:
+                working_prompt=('STRICT RESPONSE: Return one compact JSON object '
+                                'with the requested keys ONLY. Max 30 words '
+                                'outside numeric values. No lists of reasoning, '
+                                'no proof, no markdown.\n'+working_prompt)
         if schema_retry or think_retry or length_retry:
             continue
         if context_retry:
@@ -6970,6 +7138,11 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
                f'thinking_chars={reasoning_chars}, num_ctx={num_ctx}, '
                f'num_predict={output_budget}. Likely truncated output or '
                'structured-format incompatibility.')
+    if response_char_cap:
+        raise RuntimeError(f'Ollama {model}: compact review JSON failed after '
+                           f'{attempt_limit} bounded attempts. {cause[:330]} '
+                           'The last saved candidate is preserved; inspect '
+                           'Ollama version/model structured-output compatibility.')
     raise RuntimeError(f'Ollama {model}: {attempt_limit} attempts exhausted. '
                        f'{cause[:360]} | Try shorter prompts or '
                        'BRAIN_REVIEW_MODEL=qwen2.5:3b for a smaller local model.')
@@ -7155,17 +7328,22 @@ def _question_payload_diagnostic(payload):
 # Ask for a FLAT object when requesting exactly one question.  The former
 # {"questions":[{...}]} nesting unnecessarily reduced format reliability.
 ONE_QUESTION_SCHEMA = {
-    'type': 'object',
-    'properties': {
-        **{k: {'type': 'string'} for k in (
-            'title', 'formal_objects', 'assumptions', 'question',
-            'approach', 'gaps', 'motivation')},
-        'evidence_ids': {'type': 'array', 'items': {'type': 'string'}},
+    'type':'object','additionalProperties':False,
+    'properties':{
+        'title':{'type':'string','maxLength':140},
+        'formal_objects':{'type':'string','maxLength':950},
+        'assumptions':{'type':'string','maxLength':950},
+        'question':{'type':'string','maxLength':1700},
+        'evidence_ids':{'type':'array','maxItems':8,
+                        'items':{'type':'string','maxLength':28}},
     },
-    # The model must focus on a well-defined question rather than fill eight
-    # long mandatory prose fields.  Optional fields stay in the saved payload.
-    'required': ['title', 'formal_objects', 'assumptions', 'question'],
+    'required':['title','formal_objects','assumptions','question'],
 }
+
+
+def question_word_budget(topic_count):
+    """Keep propositions concise without discarding math for many topics."""
+    return min(170, 75 + 9*max(0, int(topic_count)-3))
 
 
 def compact_question_evidence(context, paths, max_chars=2800):
@@ -7235,30 +7413,30 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
              {str(r.get('ref','')) for r in context_data['source_quotes']})- {''}
     taken={str(x).casefold().strip() for x in existing_titles}
     query_topics=requested_question_topics(context)
+    statement_words=question_word_budget(len(query_topics))
     slot_number=int(slot_number) if slot_number is not None else len(existing_titles)+1
     focus=''
-    if len(query_topics)>=2:
+    if query_topics:
         focus=('The user REQUIRED the following subjects: '+
                json.dumps(query_topics,ensure_ascii=False)+'. EACH question must substantively '
-               'integrate ALL these requested subjects through a precise shared mathematical '
-               'model or explicitly defined mapping. Each subject must contribute a variable, '
-               'constraint, equation, or mathematical objective—not just a keyword. '
-               'For finance include a defined financial object (e.g. portfolio weights, '
-               'asset returns, risk, hedging or pricing). Make assumptions under which the '
-               'cross-field connection is valid. If the supplied memory evidence lacks '
+               'use ALL these requested subjects substantively. With ONE subject, stay '
+               'rigorously in that subject. With multiple subjects, use an actual shared '
+               'mathematical model or defined mapping. Each subject needs a concrete '
+               'quantity, operation, constraint or equation, never a keyword alone. '
+               'State conditions under which the connection is valid. If memory evidence lacks '
                'the connection, formulate a TESTABLE hypothesis and disclose the evidence gap; '
                'never fabricate a proven result or citation. ')
     single=(count==1)
     if single:
         format_instruction=(
-            'Generate exactly ONE question as a flat JSON object, not a questions array. Example: '
-            '{"title":"Concise title", "formal_objects":"Precisely defined objects and notation", '
-            '"assumptions":"Explicit assumptions", "question":"A specific, provable or refutable proposition", '
-            '"evidence_ids":[]}. '
-            'Required: title, formal_objects, assumptions, question. '
-            'Optional: approach, gaps, motivation, evidence_ids. '
-            'Keep the question to ONE falsifiable proposition, 25-65 English words; '
-            'put only essential mathematical notation in formal_objects and assumptions. '
+            'Generate ONE FLAT JSON object with title, formal_objects, assumptions, '
+            'question, and optionally evidence_ids. NO other fields. '
+            'Use one clear mathematical proposition, never a long essay. '
+            f'Keep question preferably within {statement_words} English words; '
+            'math definitions and hypotheses belong in formal_objects/assumptions. '
+            'Preserve all essential quantifiers and constraints even if the word target '
+            'is exceeded. Do NOT write proofs, explanations, introductory prose or '
+            'repeated background. '
         )
     else:
         format_instruction=(
@@ -7276,9 +7454,10 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
         'Do not mistake word co-occurrence for causality or logical implication, and do not invent citations. '
         'Use evidence_ids such as S1 or R1 only for claims directly supported by the corresponding supplied evidence. '
         'A source excerpt is not itself a mathematical proof. '
-        'Use an empty evidence_ids list when no verified source identifier applies, and explain the limitation in gaps. '
-        'Be precise and economical: question 25-65 English words, title <= 10 words, '
-        'formal_objects and assumptions <= 45 words each; optional method/gap <= 25 words. '
+        'Use evidence_ids=[] when no provided citation supports the claim; never invent identifiers. '
+        f'Be mathematically precise and economical: question preferably <= {statement_words} '
+        'English words, title <= 10 words; each definition/assumption should be as short '
+        'as possible WITHOUT losing necessary domains, quantifiers or constraints. '
         'Do not repeat the context, citations or critique inside the question. '
         +focus+'Previously generated questions, which must not be duplicated: '
         +json.dumps(list(existing_titles)[-6:],ensure_ascii=False)+'. '
@@ -7312,7 +7491,7 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
         'Your previous research-question JSON failed the required format or content checks. '
         'Using the original response, provide missing mathematical objects, definitions, and a testable proposition. '
         'Do not fabricate literature, proven conclusions, or unsupported claims. '
-        'Cite only source-grounded S or R identifiers; otherwise use evidence_ids=[] and explain gaps. '
+        'Cite only source-grounded S or R identifiers; otherwise use evidence_ids=[]. '
         'Avoid duplicating these question titles: '+json.dumps(list(existing_titles)[-6:],ensure_ascii=False)+'. '
         +format_instruction+
         '\nValidation issue: '+initial_problem+
@@ -7379,29 +7558,125 @@ def draft_ten_questions(model, context, paths, progress=None):
     return draft_questions(model, context, paths, 10, progress)
 
 
+# Ollama's schema mode can still produce verbose text on small models.  Keep
+# every review JSON object short, forbid hallucinated additional keys, and
+# separate revision-difference auditing from the mathematical review.
 JUDGE_SCHEMA = {
-    'type':'object', 'properties':{
-        'rubric':{'type':'object','properties':{
-            k:{'type':'integer'} for k in QUESTION_RUBRIC},
-            'required':list(QUESTION_RUBRIC)},
-        'critique':{'type':'string'}, 'verifiable':{'type':'boolean'}},
+    'type':'object', 'additionalProperties':False,
+    'properties':{
+        'rubric':{'type':'object','additionalProperties':False,
+                  'properties':{k:{'type':'integer','minimum':0,'maximum':20}
+                                for k in QUESTION_RUBRIC},
+                  'required':list(QUESTION_RUBRIC)},
+        'critique':{'type':'string','maxLength':250},
+        'verifiable':{'type':'boolean'}},
     'required':['rubric','critique','verifiable'],
 }
-# Version comparison is made WITH the scheduled reviewer call, not by adding
-# a second slow model request. The original reviewer still judges mathematical
-# content, while the extra fields explain whether an edit fixed prior defects.
+JUDGE_ATOMIC_SCHEMA = {
+    'type':'object','additionalProperties':False,
+    'properties':{
+        'score':{'type':'integer','minimum':0,'maximum':20},
+        'issue':{'type':'string','maxLength':170},
+        'verifiable':{'type':'boolean'}},
+    'required':['score','issue','verifiable'],
+}
+
+
+def _atomic_math_review(model, compact, evidence, *, progress=None,
+                        cancel_event=None):
+    """Quality-preserving fallback if the full judge JSON repeatedly truncates.
+
+    Five isolated 0..20 scores are slower, but avoid sending another large
+    JSON after a model already failed on the compact aggregate response.
+    The verifiable flag is assessed explicitly in each call, and only the
+    decidability verdict is authoritative for that specific property.
+    """
+    scores={};issues=[];can_verify=False
+    for i,(criterion,description) in enumerate(QUESTION_RUBRIC.items(),1):
+        if progress:progress(f'Focused mathematical audit {i}/{len(QUESTION_RUBRIC)}: {criterion}')
+        prompt=(
+            'You are a rigorous mathematical referee. Assess ONLY this ONE '
+            'criterion; do not score any other criterion or produce an essay. '
+            'Return exactly JSON with: score INTEGER 0..20, issue one specific '
+            'mathematical defect (<= 20 words, or "none"), verifiable boolean. '
+            'For verifiable: true ONLY when the proposition has precisely '
+            'stated objects and assumptions and admits a proof/counterexample. '
+            'Check notation, mathematical validity, and limits; never treat '
+            'citation snippets as proof. No markdown, no commentary. '
+            '\nCriterion '+criterion+': '+description+
+            '\nQuestion: '+json.dumps(compact,ensure_ascii=False,separators=(',',':'))+
+            '\nProvenance hints: '+json.dumps(evidence,ensure_ascii=False,separators=(',',':')))
+        verdict=ollama_json(model,prompt,num_predict=225,
+            timeout=max(90,min(900,int(os.environ.get('BRAIN_JUDGE_TIMEOUT','180')))),
+            response_schema=JUDGE_ATOMIC_SCHEMA,progress=progress,
+            cancel_event=cancel_event,think=False)
+        if not isinstance(verdict,dict) or type(verdict.get('score')) is not int or \
+                type(verdict.get('verifiable')) is not bool:
+            raise ValueError('Atomic mathematical audit returned incomplete JSON: '+criterion)
+        scores[criterion]=verdict['score']
+        issue=str(verdict.get('issue') or '').strip()
+        if issue and issue.casefold() not in ('none','n/a','no issue'):
+            issues.append(criterion+': '+issue[:120])
+        if criterion=='decidability':can_verify=verdict['verifiable']
+    return {'rubric':scores,'critique':'; '.join(issues[:2])[:250],
+            'verifiable':can_verify}
+
+
+# Keep the old public name for compatibility, but do not request this much
+# output as part of the judge response.  The delta has its own small request.
+_DELTA_FIELDS = {
+    'fixed':{'type':'string','maxLength':100},
+    'remaining':{'type':'string','maxLength':100},
+    'new_errors':{'type':'string','maxLength':100},
+    'consistent':{'type':'boolean'}, 'acceptable':{'type':'boolean'},
+    'rationale':{'type':'string','maxLength':120},
+}
 DELTA_JUDGE_SCHEMA = {
-    'type':'object', 'properties':{
-        **JUDGE_SCHEMA['properties'],
-        'delta':{'type':'object','properties':{
-            'fixed':{'type':'string'}, 'remaining':{'type':'string'},
-            'new_errors':{'type':'string'}, 'consistent':{'type':'boolean'},
-            'acceptable':{'type':'boolean'}, 'rationale':{'type':'string'}},
-            'required':['fixed','remaining','new_errors','consistent',
-                        'acceptable','rationale']}
-    },
+    'type':'object','additionalProperties':False,
+    'properties':{**JUDGE_SCHEMA['properties'],
+                  'delta':{'type':'object','additionalProperties':False,
+                           'properties':_DELTA_FIELDS,
+                           'required':list(_DELTA_FIELDS)}},
     'required':['rubric','critique','verifiable','delta'],
 }
+DELTA_ONLY_SCHEMA = {
+    'type':'object','additionalProperties':False,
+    'properties':{'delta':{'type':'object','additionalProperties':False,
+                           'properties':_DELTA_FIELDS,
+                           'required':list(_DELTA_FIELDS)}},
+    'required':['delta'],
+}
+
+
+def audit_question_revision(model, prior_question, current_question, previous_review, *,
+                            progress=None, cancel_event=None):
+    """Short, independent revision check; never request an essay-sized verdict.
+
+    Missing/invalid evidence must fail CLOSED: no invented accepted revision.
+    """
+    fields=('formal_objects','assumptions','question')
+    before={k:_question_text(prior_question.get(k,''))[:250] for k in fields}
+    after={k:_question_text(current_question.get(k,''))[:250] for k in fields}
+    prompt=(
+        'Check whether the revised mathematical research question corrects the old '
+        'one WITHOUT introducing errors or losing hypotheses. Only JSON. '
+        'All string values <= 15 words. fixed: corrected issue; remaining: remaining '
+        'defect; new_errors: new errors or "none"; consistent: consistent objects; '
+        'acceptable: mathematically safe improvement; rationale: one short reason. '
+        'Do not mistake different wording for a substantive correction. '
+        '\nOriginal: '+json.dumps(before,ensure_ascii=False,separators=(',',':'))+
+        '\nRevised: '+json.dumps(after,ensure_ascii=False,separators=(',',':'))+
+        '\nPrior issue: '+str((previous_review or {}).get('critique',''))[:150])
+    obj=ollama_json(model,prompt,num_predict=330,
+        timeout=max(90,min(900,int(os.environ.get('BRAIN_JUDGE_TIMEOUT','180')))),
+        response_schema=DELTA_ONLY_SCHEMA,think=False,
+        progress=progress,cancel_event=cancel_event)
+    delta=obj.get('delta') if isinstance(obj,dict) else None
+    if not isinstance(delta,dict) or not all(k in delta for k in _DELTA_FIELDS):
+        raise ValueError('Revision audit missing required fields; earlier version preserved.')
+    return {'delta':delta}
+
+
 CRITIC_SCHEMA = {
     'type':'object','properties':{'suggestions':{'type':'string'},
                                    'priority':{'type':'string'}},
@@ -7485,89 +7760,83 @@ def _validated_delta(obj, structural):
 
 def judge_question(model, question, context, *, prior_question=None,
                    prior_review=None, progress=None, cancel_event=None):
-    """One call judges math and (for revisions) verifies the version delta.
+    """Separate bounded mathematical grading, topic audit and revision audit.
 
-    Scores are heuristic.  Numerical gains alone MUST NOT approve a version
-    that introduces an error, removes essential hypotheses or loses provenance.
+    A small local LLM is much more reliable with three tiny JSON responses than
+    one giant score + critique + full delta essay.  No invented audit success.
     """
-    compact={k:str(question.get(k,''))[:280] for k in
-             ('title','formal_objects','assumptions','question','gaps','approach')}
-    compact['evidence_ids']=question.get('evidence_ids',[])[:10]
-    evidence=compact_question_evidence(context,[],max_chars=550)
-    version_context=''
-    schema=JUDGE_SCHEMA
-    if prior_question is not None:
-        structural=_version_changes(prior_question,question)
-        old={key:_question_text(prior_question.get(key,''))[:180] for key in
-             ('formal_objects','assumptions','question')}
-        prior_note=str((prior_review or {}).get('critique',''))[:140]
-        version_context=(
-            '\nPrevious research core: '+json.dumps(old,ensure_ascii=False)+
-            '\nPrevious review findings: '+prior_note+
-            '\nPython-computed field changes and risks: '+json.dumps({
-                'changed_fields':structural['changed_fields'],
-                'warnings':structural['warnings']},ensure_ascii=False)+
-            '\nFor each delta field, report fixed (resolved issues), remaining (unresolved issues), '
-            'new_errors (newly introduced errors, or "none"), consistent (whether objects remain consistent), '
-            'acceptable (whether this revision can replace the previous one), and rationale (specific reasoning). '
-            'Set acceptable to false if the revision introduces errors, loses required assumptions, '
-            'or relies on inapplicable evidence. '
-        )
-        schema=DELTA_JUDGE_SCHEMA
+    core_limits={'title':120,'formal_objects':240,'assumptions':240,
+                 'question':340,'gaps':120,'approach':120}
+    compact={k:str(question.get(k,'') or '')[:v] for k,v in core_limits.items()}
+    compact['evidence_ids']=list(question.get('evidence_ids',[]) or [])[:6]
+    evidence=compact_question_evidence(context,[],max_chars=350)
     prompt=(
-        'Research domain: '+domain_name()+'. Evaluation criteria: '+domain_review_guide()+'. '
-        'You are a rigorous cross-disciplinary mathematical reviewer. Do not inflate scores to reward effort. '
-        'Score each rubric category from 0 to 20: formal objects and notation, assumptions, '
-        'provability or falsifiability, traceable evidence, and mathematical depth. '
-        'Topic alignment is audited separately and contributes up to 20 points to the final score. '
-        'Reduce the depth score for a mere restatement of a known result and reduce the evidence score for unsupported claims. '
-        'Check definitions, notation, quantifiers, necessary and sufficient assumptions, prior results, '
-        'feasible proofs or counterexamples, and the validity of proposed cross-field mappings. '
-        'In critique, give up to TWO specific corrections, at most 45 English words total. '
-        'Do not use vague praise or empty suggestions even when the score is high. '
-        'Return only JSON containing rubric (formal_objects, assumptions, decidability, evidence, depth), '
-        'critique, verifiable (Boolean), and delta when reviewing a revision. '
-        '\nCurrent question: '+json.dumps(compact,ensure_ascii=False)+
-        '\nCited evidence: '+json.dumps(evidence,ensure_ascii=False)+version_context)
-    obj=ollama_json(model,prompt,num_predict=700 if prior_question is not None else 500,
-                    timeout=max(90,min(900,int(os.environ.get('BRAIN_JUDGE_TIMEOUT','180')))),
-                    response_schema=schema,progress=progress,
-                    cancel_event=cancel_event,think=False)
-    raw=obj.get('rubric',{})
-    if not isinstance(raw,dict):raw={}
+        'Grade this mathematical research proposition. Return ONLY a SHORT JSON '
+        'object with exactly rubric, critique and verifiable. rubric MUST have '
+        'integer fields formal_objects, assumptions, decidability, evidence, depth '
+        '(each 0..20). critique: up to TWO specific mathematical corrections, '
+        'at most 35 words TOTAL. verifiable: true only if stated objects, '
+        'assumptions and claim permit proof or counterexample. '
+        'Check definitions, quantifiers, assumptions, known counterexamples, '
+        'and source support. Do not inflate scores or claim citations prove it. '
+        'Do NOT reproduce the question, steps, or hidden reasoning. '
+        'The requested subject-linkage score is checked separately. '
+        '\nQuestion: '+json.dumps(compact,ensure_ascii=False,separators=(',',':'))+
+        '\nSource hints, not proofs: '+json.dumps(evidence,ensure_ascii=False,separators=(',',':')))
+    try:
+        obj=ollama_json(model,prompt,num_predict=420,
+                        timeout=max(90,min(900,int(os.environ.get('BRAIN_JUDGE_TIMEOUT','180')))),
+                        response_schema=JUDGE_SCHEMA,progress=progress,
+                        cancel_event=cancel_event,think=False)
+    except RuntimeError as exc:
+        # Retry format failures as five genuinely smaller mathematical
+        # assessments, not as one 10k-character review over and over.
+        message=str(exc).casefold()
+        if not any(word in message for word in ('json', 'schema', 'truncat',
+                                                'structured', 'output')):
+            raise
+        if progress:progress('Aggregate review exceeded structured-output limits; '
+                             'switching to five focused mathematical audits.')
+        obj=_atomic_math_review(model,compact,evidence,progress=progress,
+                                cancel_event=cancel_event)
+    raw=obj.get('rubric') if isinstance(obj,dict) else None
+    if not isinstance(raw,dict) or any(k not in raw for k in QUESTION_RUBRIC) or \
+            not isinstance(obj.get('verifiable'),bool):
+        raise ValueError('Ollama math review returned incomplete rubric JSON; not saved as a valid score.')
     grades={}
     for key in QUESTION_RUBRIC:
-        try:score=round(float(raw.get(key,0)))
-        except (ValueError,TypeError):score=0
-        grades[key]=max(0,min(20,int(score)))
-    required_topics=requested_question_topics(context)
+        try:grade=round(float(raw[key]))
+        except (ValueError,TypeError) as exc:
+            raise ValueError('Ollama math review invalid rubric field: '+key) from exc
+        grades[key]=max(0,min(20,int(grade)))
     alignment=evaluate_question_topic_alignment(model,question,context,
                     progress=progress,cancel_event=cancel_event)
     if not question.get('evidence_ids'):
         grades['evidence']=0
-    # Five original criteria each retain their 0..20 raw grade. Scale their
-    # 100 possible points to 80, plus 0..20 for substantive topic linkage.
     grades['topic_linkage']=int(alignment['linkage_score'])
     score=round(0.8*sum(grades[k] for k in QUESTION_RUBRIC)+grades['topic_linkage'])
     if not question.get('evidence_ids'):
         score=min(score,60)
-    if obj.get('verifiable') is not True:
+    if obj['verifiable'] is not True:
         score=min(score,70)
     if not alignment['passed']:
-        score=min(score,49)  # Reject topic drift even when math is elegant.
+        score=min(score,49)
     topic_issue=('Missing substantive subjects: '+', '.join(alignment['missing'])
                  if alignment['missing'] else 'Insufficient cross-topic mathematical linkage.')
-    model_critique=str(obj.get('critique',''))[:250]
+    model_critique=str(obj.get('critique','') or '')[:250]
     if not alignment['passed']:
         model_critique=(topic_issue+' '+alignment['issues']+' '+model_critique).strip()[:380]
     review={'rubric':grades,'score':score,'topic_alignment':alignment,
             'critique':model_critique,
-            'verifiable':obj.get('verifiable') is True}
+            'verifiable':obj['verifiable'] is True}
     if prior_question is not None:
-        review['difference']=_validated_delta(obj,structural)
+        structural=_version_changes(prior_question,question)
+        delta_report=audit_question_revision(model,prior_question,question,prior_review,
+            progress=progress,cancel_event=cancel_event)
+        review['difference']=_validated_delta(delta_report,structural)
         if not review['verifiable'] or not alignment['passed']:
             review['difference']['accepted']=False
-            review['difference']['reason']+='; verifiability or required-topic linkage not established '
+            review['difference']['reason']+='; verifiability or requested-topic linkage not established'
     return review
 
 
@@ -7623,13 +7892,13 @@ def critique_question(model,question,assessment, *, progress=None,cancel_event=N
 # missing title caused a failed review cycle.  The original question remains
 # the immutable source of fields that the reviser did not explicitly change.
 REVISION_PATCH_SCHEMA = {
-    'type': 'object',
-    'properties': {
-        'question': {'type': 'string'},
-        'assumptions': {'type': 'string'},
-        'formal_objects': {'type': 'string'},
+    'type':'object','additionalProperties':False,
+    'properties':{
+        'question':{'type':'string','maxLength':1650},
+        'assumptions':{'type':'string','maxLength':900},
+        'formal_objects':{'type':'string','maxLength':900},
     },
-    'required': ['question'],
+    'required':['question'],
 }
 
 
@@ -7703,6 +7972,7 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
               for key in ('formal_objects','assumptions','question')}
     critique_text=str(critique or assessment.get('critique') or '')[:260]
     required_topics=requested_question_topics(context)
+    revision_word_budget=question_word_budget(len(required_topics))
     alignment=assessment.get('topic_alignment') or {}
     missing=list(alignment.get('missing') or [])
     topic_repair=(
@@ -7711,16 +7981,17 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
         ' must contribute mathematically. Missing: '+
         json.dumps(missing,ensure_ascii=False)+
         '. Create an actual cross-field equation, variable or constrained model; '
-        'for finance explicitly define a portfolio/asset/pricing/risk quantity. '
+        'Use a concrete mathematical quantity for each topic, not just its name. '
         'Do not just mention the field names. '
-        if len(required_topics)>=2 else '')
+        if required_topics else '')
     evidence=compact_question_evidence(context, [], max_chars=460)
     evidence['claims']=evidence.get('claims',[])[:2]
     prompt=(
         'Revise ONE mathematical proposition to address the critic. '
         'Output only a JSON object with question and, ONLY when necessary, '
         'assumptions or formal_objects. No title, preamble, proof, essay or citations. '
-        'The question must be ONE precise provable/refutable statement (25-65 English words). '
+        f'The question must be ONE precise provable/refutable statement (preferably '
+        f'<= {revision_word_budget} English words; essential conditions take priority). '
         'Retain essential quantifiers, definitions, mathematical conditions, and limits. '
         'Never assert a theorem as established without evidence or invent a source. '
         'If correction needs a change to assumptions or notation, return that complete '
@@ -7742,7 +8013,7 @@ def revise_question(model, old, assessment, critique, context, *, progress=None,
             request=(
                 'Return ONLY JSON: {"question":"one corrected precise mathematical '
                 'proposition","assumptions":"changed conditions if needed"}. '
-                'Question 25-65 words, retain necessary mathematical definitions. '
+                f'Question preferably <= {revision_word_budget} words; retain necessary definitions. '
                 '\nPrevious: '+json.dumps(old_core,ensure_ascii=False,separators=(',',':'))+
                 '\nFix: '+critique_text[:190]+'\n'+topic_repair[:490]
             )
@@ -7959,24 +8230,48 @@ def export_final_question_set(set_id, base_dir=None):
         f'Maximum model-review rounds: {round_limit}',f'Exported at (UTC): {exported_at}',
         'Note: Model scores and comments do not constitute independent domain validation or a novelty assessment.','',
     ]
-    labels=(('title','Title'),('formal_objects','Formal objects and definitions'),
-            ('assumptions','Assumptions'),('question','Proposition to prove or refute'),
-            ('approach','Research approach'),('evidence_ids','Source and relation IDs'),
-            ('evidence_status','Evidence status'),('gaps','Known limitations'),
-            ('motivation','Research motivation'))
+    # Reader-facing TXT is NOT the model's internal JSON. Keep it compact and
+    # legible, but never shorten a mathematical proposition in the export.
     for item in questions:
-        text_lines.extend([f"Question {item['number']} | Final version v{item['version']}",'─'*56])
         problem=item['problem']
-        for key,caption in labels:
-            text_lines.append(f'{caption}: {display(problem.get(key))}')
         review=item['review']
-        text_lines.extend([f"Model score: {review['score']}/100",
-             f"Topic alignment: {item['topic_alignment_status']}",
-             f"Topic roles and linkage: {display(item['topic_alignment'])}",
-             f"Review model: {review['model']}",
-             f"Model comments: {display(review['comment'])}",
-             f"Rubric scores: {display(review['rubric'])}",
-             f"Revision-difference check: {display(item.get('revision_comparison'))}",''])
+        text_lines.extend([
+            f"Q{item['number']}. {display(problem.get('title'))}  [v{item['version']}]",
+            '─'*56,
+        ])
+        if topic:
+            text_lines.append('Requested subjects: '+str(topic))
+        for field,caption in (('formal_objects','Mathematical objects'),
+                              ('assumptions','Assumptions'),
+                              ('question','Research question')):
+            value=display(problem.get(field)).strip()
+            if value:text_lines.append(caption+': '+value)
+        alignment=item.get('topic_alignment')
+        if isinstance(alignment,dict):
+            role_rows=alignment.get('coverage') or []
+            covered=[str(rec.get('topic','')) for rec in role_rows
+                     if isinstance(rec,dict) and rec.get('present') is True]
+            missing=[str(t) for t in (alignment.get('missing') or []) if t]
+            score=alignment.get('linkage_score')
+            if role_rows:
+                text_lines.append(f'Topic coverage: {len(covered)}/{len(role_rows)}'
+                                  +(f' | linkage {score}/20' if score is not None else ''))
+            if missing:
+                text_lines.append('Missing mathematical subjects: '+', '.join(missing))
+        else:
+            text_lines.append('Topic review: legacy / not assessed')
+        text_lines.append(f"Model review: {review['score']}/100 "
+                          '(model judgment; not independent validation)')
+        critique=str(review.get('comment') or '').strip()
+        if critique:
+            text_lines.append('Main review issue: '+critique)
+        # Detailed source IDs and provenance remain present in the JSON export.
+        evidence=problem.get('evidence_ids') or []
+        if evidence:
+            text_lines.append('Source IDs (unverified as proof): '+display(evidence))
+        else:
+            text_lines.append('Source support: not independently established')
+        text_lines.append('')
 
     root=Path(base_dir).expanduser().resolve() if base_dir is not None else Path(__file__).resolve().parent
     folder=root/'Questions'
@@ -8325,83 +8620,111 @@ def _flin_source_sentence_spans(text, minimum=28, maximum=500, cap=260):
 
 
 def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *, max_clusters=32):
-    """Observe source-backed mathematical features in ordered text inputs.
+    """Extract ordered, grounded inputs, prioritizing evidence for REAL links.
 
-    Includes (a) validated mathematical names in real, short paper titles;
-    (b) noun-headed mathematical constructs absent from a fixed dictionary;
-    (c) adjacent short abstract sentences as one *contiguous observed* context.
-    Adjacent input order licenses association, NOT a claimed mathematical proof.
-    No language model or semantic embedding decides whether to create a unit.
+    A title may create individual memories, but title co-mention does not invent
+    an association. Separate, immediately adjacent statements within the SAME
+    abstract/full text are observable input order: bridge only the last qualified
+    feature in the first sentence to the first in the next. Neither source
+    similarity nor sharing a paper alone licenses a directed link.
+
+    Prepare candidates BEFORE applying max_clusters: the older first-N-sentences
+    cutoff commonly exhausted its budget on singleton memories, silently
+    discarding the multi-feature inputs that can actually learn associations.
     """
     raw=' '.join(str(x or '') for x in (title,abstract,(fulltext or '')[:48000]))
     if not raw.strip():return []
     cap=max(1,int(max_clusters))
     extra=[name for name,_ in keyphrases(raw,str(title or ''),limit=24)]
-    sections=[('title',str(title or ''),28,500,1),
-              ('abstract',str(abstract or ''),28,500,160),
-              ('fulltext',str(fulltext or '')[:48000],28,500,260)]
-    clusters=[];seen=set();global_index=0
-    def add_cluster(quote,base_index,*,is_title=False):
-        if not 28<=len(quote)<=1100 or len(clusters)>=cap:return False
-        # A title is enough to observe a *named mathematical concept*, never
-        # enough to assert an explanation or an association between subjects.
-        terms=flin_math_terms_from_source(quote,extra)
-        selected=[];seen_units=set()
-        for start,end,label in terms:
-            if label in seen_units:continue
-            seen_units.add(label)
-            selected.append({'label':label,'explanation':quote,'url':url,
-                             'position':float(base_index)+start/max(1,len(quote))})
-        if not selected:return False
-        if not is_title and len(selected)<2 and not abc_explanatory_evidence(quote):
-            return False
-        if is_title and len(selected)>1:
-            # A title may literally name several independent mathematical
-            # objects. Admit each as a separate observed memory without
-            # fabricating a directional relationship between title terms.
-            for unit in selected:
-                if len(clusters)>=cap:break
-                fingerprint=hashlib.sha256(
-                    (abc_key(quote)+'|title:'+abc_key(unit['label'])).encode('utf-8')).hexdigest()[:24]
-                if fingerprint in seen:continue
-                seen.add(fingerprint)
-                cluster_id='online:'+hashlib.sha256(
-                    (str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
-                clusters.append({'id':cluster_id,'paper_id':str(paper_id),
-                                 'quote':quote,'url':str(url or ''),'features':[unit]})
-            return True
-        fingerprint=hashlib.sha256(abc_key(quote).encode('utf-8')).hexdigest()[:24]
-        if fingerprint in seen:return False
-        seen.add(fingerprint)
-        cluster_id='online:'+hashlib.sha256((str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
-        clusters.append({'id':cluster_id,'paper_id':str(paper_id),'quote':quote,
-                         'url':str(url or ''),'features':selected})
-        return True
+    candidates=[]
+    ordinal=0
 
-    for kind,source,minimum,maximum,maxparts in sections:
+    def submit(quote,base_index,kind,*,title_input=False,bridge=None,recognized_terms=None):
+        nonlocal ordinal
+        if not 28<=len(quote)<=1100:return
+        if bridge is None:
+            terms=(recognized_terms if recognized_terms is not None else
+                   flin_math_terms_from_source(quote,extra))
+            selected=[];seen_units=set()
+            for first,last,label in terms:
+                if label in seen_units:continue
+                seen_units.add(label)
+                selected.append({'label':label,'explanation':quote,'url':url,
+                                 'position':float(base_index)+first/max(1,len(quote))})
+        else:
+            selected=[]
+            for off,label in bridge:
+                selected.append({'label':label,'explanation':quote,'url':url,
+                                 'position':float(base_index)+off/max(1,len(quote))})
+        if not selected:return
+        if bridge is None and not title_input and len(selected)<2 and not abc_explanatory_evidence(quote):
+            return
+        if title_input and len(selected)>1:
+            # Unlike an observed multi-feature statement, a paper title is only
+            # metadata. Multiple title terms get distinct singleton clusters.
+            sets=[[one] for one in selected]
+        else:
+            sets=[selected]
+        for items in sets:
+            if bridge is not None:
+                fingerprint=hashlib.sha256((abc_key(quote)+'|adjacent-boundary|'+
+                    '|'.join(abc_key(x['label']) for x in items)).encode('utf-8')).hexdigest()[:24]
+            elif title_input and len(selected)>1:
+                # Preserve historic title cluster IDs for idempotent backfill.
+                fingerprint=hashlib.sha256((abc_key(quote)+'|title:'+
+                    abc_key(items[0]['label'])).encode('utf-8')).hexdigest()[:24]
+            else:
+                fingerprint=hashlib.sha256(abc_key(quote).encode('utf-8')).hexdigest()[:24]
+            cluster_id='online:'+hashlib.sha256((str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
+            # Keep title concepts, then prioritize same-sentence multi-feature
+            # input and adjacent abstract boundaries over unrelated singletons.
+            priority=(0 if title_input else
+                      2 if kind=='abstract' and bridge is not None else
+                      1 if kind=='abstract' and len(items)>=2 else
+                      4 if kind=='fulltext' and bridge is not None else
+                      3 if kind=='fulltext' and len(items)>=2 else
+                      5 if kind=='abstract' else 6)
+            candidates.append((priority,ordinal,cluster_id,quote,items))
+            ordinal+=1
+
+    sections=[('title',str(title or ''),1),
+              ('abstract',str(abstract or ''),160),
+              ('fulltext',str(fulltext or '')[:48000],260)]
+    global_index=0
+    for kind,source,maxparts in sections:
         if not source:continue
-        sentences=_flin_source_sentence_spans(source,minimum,maximum,maxparts)
+        sentences=_flin_source_sentence_spans(source,28,500,maxparts)
+        recognized=[]
         for a,b,quote in sentences:
-            if len(clusters)>=cap:return clusters
-            add_cluster(quote,global_index,is_title=(kind=='title'))
+            terms=flin_math_terms_from_source(quote,extra)
+            recognized.append((a,b,quote,terms))
+            submit(quote,global_index,kind,title_input=(kind=='title'),
+                   recognized_terms=terms)
             global_index+=1
-        if kind=='abstract' and len(clusters)<cap:
-            # In a real abstract the next sentence is an adjacent input in
-            # the same source. Join only actual contiguous spans; never join
-            # a title to another document or arbitrary distant paragraphs.
-            for (a,b,left),(c,d,right) in zip(sentences,sentences[1:]):
-                if c-b>8 or d-a>1050:continue
-                first=flin_math_terms_from_source(left,extra)
-                second=flin_math_terms_from_source(right,extra)
-                if (len(first)!=1 or len(second)!=1 or first[0][2]==second[0][2]):
-                    continue
-                quote=source[a:d]
-                # Preserve occurrence order (source offsets), even if a
-                # neighboring clause has no explanatory verb by itself.
-                add_cluster(quote,global_index)
+        if kind in ('abstract','fulltext'):
+            for (a,b,left,lterms),(c,d,right,rterms) in zip(recognized,recognized[1:]):
+                # A valid sentence boundary within the SAME original source.
+                # Never bridge titles, unrelated papers, or distant paragraphs.
+                if c-b>8 or d-a>1050 or not lterms or not rterms:continue
+                left_last=lterms[-1]
+                right_first=rterms[0]
+                if left_last[2]==right_first[2]:continue
+                original_quote=source[a:d]
+                # Only this observed boundary pair, not every possible pair
+                # across a document, becomes an ordered SSRS input.
+                submit(original_quote,global_index,kind,bridge=(
+                    (left_last[0],left_last[2]),
+                    (c-a+right_first[0],right_first[2])))
                 global_index+=1
-                if len(clusters)>=cap:break
-    return clusters
+
+    result=[];seen=set()
+    for _priority,_order,cid,quote,features in sorted(candidates,key=lambda x:(x[0],x[1])):
+        if cid in seen:continue
+        seen.add(cid)
+        result.append({'id':cid,'paper_id':str(paper_id),
+                       'quote':quote,'url':str(url or ''),'features':features})
+        if len(result)>=cap:break
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -8617,7 +8940,7 @@ def abc_reconcile_pending(con, limit=100, *, eta=.22, max_weight=10.):
     abc_schema(con)
     todo=[r[0] for r in con.execute('SELECT cluster_id FROM abc_replay_queue '
                                     'ORDER BY rowid LIMIT ?', (max(1,int(limit)),))]
-    made=0
+    made=0; new_links=0; reinforcements=0
     with con:
         for cid in todo:
             rows=con.execute("""SELECT f.unit_id,f.position,COALESCE(s.priority,0.)
@@ -8641,6 +8964,8 @@ def abc_reconcile_pending(con, limit=100, *, eta=.22, max_weight=10.):
                         if cursor.rowcount!=1:continue
                         row=con.execute('SELECT weight FROM abc_edges WHERE src=? AND dst=?',
                                         (src,dst)).fetchone()
+                        if row: reinforcements+=1
+                        else: new_links+=1
                         current=float(row[0]) if row else 1.
                         new=current+max(0.,min(1.,float(eta)))*(max_weight-current)
                         con.execute('INSERT INTO abc_edges(src,dst,weight,observations) '
@@ -8652,7 +8977,8 @@ def abc_reconcile_pending(con, limit=100, *, eta=.22, max_weight=10.):
             # separate from and never replaces the effective-input experience.
             flin_observe_ssrs_path(con,cid,groups)
             con.execute('DELETE FROM abc_replay_queue WHERE cluster_id=?',(cid,))
-    return {'processed':len(todo),'edges':made}
+    return {'processed':len(todo),'edges':made,
+            'new_links':new_links,'reinforcements':reinforcements}
 
 
 def abc_register_source(con, source_id, kind, title, url='', abstract='', year=None,
@@ -8713,7 +9039,7 @@ def flin_backfill_cached_abstracts(con, limit=12):
     """
     if not abc_enabled(con):
         return {'scanned':0,'clusters':0,'active':0,'edges':0,'failed':0}
-    meta='flin_source_input_backfill_v2_rowid'
+    meta='flin_source_input_backfill_v3_rowid'
     current=con.execute('SELECT value FROM abc_meta WHERE key=?',(meta,)).fetchone()
     after=int(current[0]) if current else 0
     rows=con.execute("""SELECT rowid,id,kind,title,abstract,url FROM abc_sources
@@ -8750,6 +9076,48 @@ def abc_graph_totals(con):
     return (status['topics'],status['learned_sources'],status['active'],status['edges'])
 
 
+def flin_association_health(con):
+    """Read-only evidence for distinguishing absent links from exhausted knowledge.
+
+    No hardware/UI sampling, model inference, or graph mutation. A node may be
+    active without an edge because one grounded concept suffices for formation,
+    while learned directed edges require a source-observed ordered pair.
+    """
+    active,edges=con.execute("""SELECT
+        (SELECT COUNT(*) FROM abc_units WHERE status='active'),
+        (SELECT COUNT(*) FROM abc_edges)""").fetchone()
+    source_count=con.execute('SELECT COUNT(*) FROM abc_sources').fetchone()[0]
+    single,multi=con.execute("""SELECT
+        COALESCE(SUM(CASE WHEN n=1 THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN n>=2 THEN 1 ELSE 0 END),0)
+        FROM (SELECT COUNT(*) n FROM abc_cluster_features GROUP BY cluster_id)""").fetchone()
+    isolated=con.execute("""SELECT COUNT(*) FROM abc_units u
+        WHERE u.status='active' AND NOT EXISTS
+            (SELECT 1 FROM abc_edges e WHERE e.src=u.id)
+        AND NOT EXISTS (SELECT 1 FROM abc_edges e WHERE e.dst=u.id)""").fetchone()[0]
+    bad_endpoints=con.execute("""SELECT COUNT(*) FROM abc_edges e
+        WHERE NOT EXISTS (SELECT 1 FROM abc_units u WHERE u.id=e.src AND u.status='active')
+           OR NOT EXISTS (SELECT 1 FROM abc_units u WHERE u.id=e.dst AND u.status='active')""").fetchone()[0]
+    updated=con.execute('SELECT COALESCE(SUM(observations),0) FROM abc_edges').fetchone()[0]
+    diagnostics=dict(con.execute('SELECT status,COUNT(*) FROM flin_ingest_diagnostics '
+                                'GROUP BY status'))
+    pending=con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0]
+    cursor=con.execute("SELECT value FROM abc_meta WHERE key='flin_source_input_backfill_v3_rowid'").fetchone()
+    return {'active_memories':active,'directed_links':edges,
+            'link_observations_total':updated,'isolated_active_memories':isolated,
+            'isolated_fraction':round(isolated/max(1,active),5),
+            'stored_single_feature_clusters':single,
+            'stored_multi_feature_clusters':multi,
+            'stored_sources':source_count,'pending_link_replay':pending,
+            'edges_with_inactive_or_missing_endpoint':bad_endpoints,
+            'ingestion_statuses':diagnostics,
+            'historical_link_recovery_cursor':int(cursor[0]) if cursor else 0,
+            'interpretation':('A stagnant link count does NOT prove all links were learned. '
+               'New singleton memories and source clusters can accumulate without '
+               'an observed ordered feature pair. Compare multi-feature clusters, '
+               'isolated nodes and link observations; repair cached sources incrementally.')}
+
+
 def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', url='',
                                *, prepared_clusters=None):
     """Web/arXiv/Crossref -> grounded clusters -> SSRS -> FLIN memory graph."""
@@ -8766,8 +9134,10 @@ def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', u
         if not res.get('duplicate'):
             done+=1;promoted+=res['promoted'];edges+=res['edges']
     # One bounded reconcile per paper, not one SQLite graph pass per sentence.
-    edges+=abc_reconcile_pending(con,limit=400)['edges']
-    return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters)}
+    replay=abc_reconcile_pending(con,limit=400)
+    edges+=replay['edges']
+    return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters),
+            'new_links':replay['new_links'], 'reinforcements':replay['reinforcements']}
 
 
 def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22,
@@ -8785,8 +9155,13 @@ def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22
     if not source_id or not isinstance(features,(list,tuple)):
         raise ValueError(' effective input must contains with unique Source and feature list ')
     source_id=str(source_id)
-    if con.execute('SELECT 1 FROM abc_learning_events WHERE source_id=?',(source_id,)).fetchone():
+    previously_observed=bool(con.execute(
+        'SELECT 1 FROM abc_learning_events WHERE source_id=?',(source_id,)).fetchone())
+    if previously_observed and cluster_quote is None:
         return {'duplicate':True,'activated':[],'promoted':0,'edges':0}
+    previous_features=({r[0] for r in con.execute(
+        'SELECT unit_id FROM abc_cluster_features WHERE cluster_id=?',(source_id,))}
+        if previously_observed else set())
     filtered={}
     for position,feature in enumerate(features[:96]):
         label=str(feature.get('label','')).strip()[:160]
@@ -8803,6 +9178,13 @@ def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22
               'url':str(feature.get('url',''))[:600],'quality':score}
         if uid not in filtered or item['position']<filtered[uid]['position']:
             filtered[uid]=item
+    if previously_observed:
+        # Parser improvements may discover a NEW feature in the exact same
+        # recorded passage. Admit only the new feature, preserving the earlier
+        # SSRS exposures, evidence votes, and idempotent abc_cluster_links.
+        filtered={uid:item for uid,item in filtered.items() if uid not in previous_features}
+        if not filtered:
+            return {'duplicate':True,'activated':[],'promoted':0,'edges':0}
     if not filtered:
         return {'duplicate':False,'activated':[],'promoted':0,'edges':0}
     # SSRS is its own pluggable routing process; external text ordering is
@@ -8908,9 +9290,19 @@ def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22
                                     'weight=excluded.weight,observations=observations+1',
                                     (a['id'],b['id'],min(max_weight,w2)))
                         updates+=1
-        con.execute('INSERT INTO abc_learning_events(source_id,gate_label,activated_json) '
-                    'VALUES(?,?,?)', (source_id,str(gate_label)[:180],
-                            json.dumps([v['id'] for v in activated],ensure_ascii=False)))
+        if not previously_observed:
+            con.execute('INSERT INTO abc_learning_events(source_id,gate_label,activated_json) '
+                        'VALUES(?,?,?)', (source_id,str(gate_label)[:180],
+                                json.dumps([v['id'] for v in activated],ensure_ascii=False)))
+        else:
+            # Preserve the original gate and add only truly new triggerable IDs.
+            row=con.execute('SELECT activated_json FROM abc_learning_events '
+                            'WHERE source_id=?',(source_id,)).fetchone()
+            try:old_ids=json.loads(row[0]) if row else []
+            except (TypeError,ValueError):old_ids=[]
+            merged=list(dict.fromkeys([*old_ids,*(v['id'] for v in activated)]))
+            con.execute('UPDATE abc_learning_events SET activated_json=? WHERE source_id=?',
+                        (json.dumps(merged,ensure_ascii=False),source_id))
     return {'duplicate':False,'activated':[f['label'] for f in activated],
             'promoted':promoted,'edges':updates}
 
@@ -14274,6 +14666,8 @@ if __name__ == "__main__":
     parser.add_argument('--flin-discovery-info',action='store_true',help='Show persistent discovery frontier and progress in SQLite')
     parser.add_argument('--flin-source-report',action='store_true',help='Show source coverage, content depth, and the last stop reason')
     parser.add_argument('--flin-efficiency-report',action='store_true',help='Show association cost decisions and formed shortcut memories')
+    parser.add_argument('--flin-association-audit',action='store_true',help='Read-only diagnostic of triggerable memories, learned links and singleton input clusters')
+    parser.add_argument('--flin-repair-associations',nargs='?',const=200,type=int,metavar='N',help='Idempotently rescan N cached sources with improved ordered-input extraction (default 200)')
     parser.add_argument('--flin-retrofit',action='store_true',help='Evaluate existing SSRS input clusters for reusable shortcut memories')
     parser.add_argument('--flin-retrofit-limit',type=int,default=1000,help='Maximum existing clusters per retrofit run (default: 1000)')
     parser.add_argument('--diagnose',action='store_true',help='Run offline database and Ollama diagnostics without revealing API keys')
@@ -14320,6 +14714,18 @@ if __name__ == "__main__":
     custom_opts=None
     if args.domain_seeds or args.domain_categories or args.domain_keywords:
         parser.error(' Custom research-domain seeds are not supported in the mathematics-only version ; please by directly from main interface Start all Mathematics automatic building .')
+    if args.flin_association_audit:
+        with database() as con:
+            print(json.dumps(flin_association_health(con),ensure_ascii=False,indent=2))
+        sys.exit(0)
+    if args.flin_repair_associations is not None:
+        with database() as con:
+            before=flin_association_health(con)
+            restored=flin_backfill_cached_abstracts(con,limit=max(1,args.flin_repair_associations))
+            after=flin_association_health(con)
+            print(json.dumps({'recovery':restored,'before':before,'after':after},
+                             ensure_ascii=False,indent=2))
+        sys.exit(0)
     if args.flin_source_report:
         with database() as con:
             depth=dict(con.execute('SELECT read_level,COUNT(*) FROM flin_source_depth GROUP BY read_level'))
