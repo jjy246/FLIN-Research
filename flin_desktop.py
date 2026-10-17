@@ -22,6 +22,8 @@ import queue
 import random
 import re
 import sqlite3
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import time
 import traceback
@@ -1376,7 +1378,7 @@ def database(path=None) -> sqlite3.Connection:
                 query TEXT NOT NULL,
                 paths_json TEXT NOT NULL,
                 problem TEXT NOT NULL DEFAULT '',
-               ModelTEXT NOT NULL DEFAULT '',
+               model TEXT NOT NULL DEFAULT '',
                 created TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS positions(
@@ -1416,7 +1418,7 @@ def database(path=None) -> sqlite3.Connection:
                 slot INTEGER NOT NULL,
                 version INTEGER NOT NULL,
                 content_json TEXT NOT NULL,
-               ModelTEXT NOT NULL,
+               model TEXT NOT NULL,
                 current INTEGER NOT NULL DEFAULT 1,
                 created TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(set_id,slot,version)
@@ -1426,7 +1428,7 @@ def database(path=None) -> sqlite3.Connection:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 candidate_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
-               ModelTEXT NOT NULL DEFAULT '',
+               model TEXT NOT NULL DEFAULT '',
                 score INTEGER,
                 comment TEXT NOT NULL DEFAULT '',
                 rubric_json TEXT NOT NULL DEFAULT '{}',
@@ -1434,6 +1436,13 @@ def database(path=None) -> sqlite3.Connection:
             );
             CREATE INDEX IF NOT EXISTS idx_question_feedback ON question_feedback(candidate_id,role,id);
             """)
+            # Upgrade a malformed legacy model-column translation in-place.
+            # Never rebuild a user database or delete any candidate/version.
+            for _table in ('association_runs', 'question_candidates', 'question_feedback'):
+                _cols = {row[1] for row in con.execute(f'PRAGMA table_info("{_table}")')}
+                if 'model' not in _cols:
+                    con.execute(f"ALTER TABLE \"{_table}\" ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            con.commit()
             # Do not expose draft questions until ALL ten questions finish model review.
             # Existing sets remain hidden until their review is explicitly resumed.
             set_columns={row[1] for row in con.execute('PRAGMA table_info(question_sets)')}
@@ -6522,45 +6531,66 @@ def _ollama_json_impl(model, prompt, num_predict=3200, timeout=600, *,
     raise RuntimeError('Ollama  already reached automatic Retry imes count maximum ; Check context , Output long degrees orModelStatus .'+str(last_error or '')[:300])
 
 
-_OLLAMA_INFERENCE_GATE = threading.Lock()
-# Track only models launched by this application. On a 4GB card, unloading the
-# PREVIOUS role's model before switching is more reliable than keeping 4B and
-# 3B simultaneously resident (which would trigger CPU offload / OOM).
-_ACTIVE_BRAIN_OLLAMA_MODEL = None
+def flin_ollama_parallelism():
+        """Bound concurrent Ollama calls; ten workflow lanes do not imply ten GPUs.
+
+        BRAIN_OLLAMA_PARALLEL=1..10 overrides the automatic conservative gate.
+        The Ollama *server* must separately support that concurrency (for example
+        via OLLAMA_NUM_PARALLEL). An override never bypasses its own scheduler.
+        """
+        override=os.environ.get('BRAIN_OLLAMA_PARALLEL','').strip()
+        if override:
+            try:return max(1,min(10,int(override)))
+            except ValueError:return 1
+        # On consumer GPUs, every parallel KV cache consumes extra VRAM;
+        # recommend single-file inference under 12 GiB available VRAM.
+        try:
+            proc=subprocess.run(['nvidia-smi','--query-gpu=memory.free',
+                '--format=csv,noheader,nounits'],capture_output=True,text=True,
+                timeout=3,check=False)
+            free=[int(x.strip().split()[0]) for x in proc.stdout.splitlines()
+                  if x.strip().split()[0].isdigit()]
+            vram_mib=max(free) if free else 0
+        except (OSError,ValueError,subprocess.TimeoutExpired):
+            vram_mib=0
+        if vram_mib>=65536:return 10
+        if vram_mib>=49152:return 6
+        if vram_mib>=32768:return 4
+        if vram_mib>=16384:return 2
+        return 1
+
+
+_OLLAMA_PARALLEL_LIMIT=flin_ollama_parallelism()
+_OLLAMA_INFERENCE_GATE=threading.BoundedSemaphore(_OLLAMA_PARALLEL_LIMIT)
+_ACTIVE_BRAIN_OLLAMA_MODEL=None
 
 
 def _unload_previous_brain_model(next_model, progress=None):
     global _ACTIVE_BRAIN_OLLAMA_MODEL
+    # Parallel Ollama requests manage residency server-side. Unloading a model
+    # while another lane uses it would destroy its in-progress generation.
+    if _OLLAMA_PARALLEL_LIMIT>1:
+        return
     previous=_ACTIVE_BRAIN_OLLAMA_MODEL
     if previous is None or previous==next_model:
         _ACTIVE_BRAIN_OLLAMA_MODEL=next_model
         return
     if os.environ.get('BRAIN_UNLOAD_BETWEEN_MODELS','1') != '0':
-        if progress:progress('4GB VRAM Modelswitch : release  '+previous+', load  '+next_model)
+        if progress:progress('Switch local model: unload '+previous+', load '+next_model)
         sess=requests.Session();sess.trust_env=False
         try:
-            # Ollama documented unload operation; never unload unknown models.
             sess.post('http://127.0.0.1:11434/api/generate',
                       json={'model':previous,'keep_alive':0,'stream':False},
                       timeout=(3,15))
         except requests.RequestException:
-            # Unload may fail when Ollama is already shutting down; let its
-            # own model scheduler decide without losing saved work.
-            if progress:progress('⚠  automatic releaseModelFailed , interaction by  Ollama  memory manager process .')
+            if progress:progress('Ollama model release was unavailable; server manages memory.')
         finally:sess.close()
     _ACTIVE_BRAIN_OLLAMA_MODEL=next_model
 
 
-
 def ollama_json(model, prompt, num_predict=3200, timeout=600, *,
                 progress=None, cancel_event=None, think=False, response_schema=None):
-    """OneModelrequest at a time; avoid simultaneous 14B CPU/VRAM contention.
-
-    A background worker can be canceled while waiting for an ongoing request.
-    Both question generation and three review roles share the same gate.
-    """
-    # Keep the original evidence-driven prompts and validation pipeline, while
-    # requiring English user-facing output from every author/reviewer role.
+    """Bounded Ollama inference shared by ten independent question pipelines."""
     prompt=(str(prompt)+'\n\nLANGUAGE REQUIREMENT: Write all generated JSON string '
             'values (including titles, statements, reviews, critiques, and revisions) '
             'in clear academic English. Preserve mathematical symbols and exact source '
@@ -6569,9 +6599,10 @@ def ollama_json(model, prompt, num_predict=3200, timeout=600, *,
     last_notice=0
     while not _OLLAMA_INFERENCE_GATE.acquire(timeout=1):
         if cancel_event is not None and cancel_event.is_set():
-            raise InterruptedError(' already cancel Waiting  Ollama; already save questions items retain .')
+            raise InterruptedError('Question generation canceled while waiting for Ollama.')
         if progress and time.monotonic()-last_notice>5:
-            progress(' waiting for previous  Ollama  reasoning task Completed (4GB VRAM  one imes only run one itemsModel)')
+            progress(f'Waiting for an Ollama inference slot '
+                     f'(parallel limit {_OLLAMA_PARALLEL_LIMIT}; 10 independent question lanes).')
             last_notice=time.monotonic()
     try:
         _unload_previous_brain_model(normalized_ollama_model(model),progress=progress)
@@ -6759,7 +6790,7 @@ def compact_question_evidence(context, paths, max_chars=2800):
 
 
 def generate_question_batch(model, context, paths, count, existing_titles=(), *,
-                            progress=None, cancel_event=None):
+                            progress=None, cancel_event=None, slot_number=None):
     """Generate with schema validation and bounded automatic self-repair.
 
     Existing valid questions are never discarded.  When theModelinvents a
@@ -6773,7 +6804,7 @@ def generate_question_batch(model, context, paths, count, existing_titles=(), *,
     query_topics=list(dict.fromkeys(str(x.get('input') or x.get('label') or '')[:65]
                                      for x in context.get('matched',[])[:20]))
     query_topics=[x for x in query_topics if x]
-    slot_number=len(existing_titles)+1
+    slot_number=int(slot_number) if slot_number is not None else len(existing_titles)+1
     focus=''
     if len(query_topics)>=2:
         first=query_topics[(slot_number-1)%len(query_topics)]
@@ -7248,8 +7279,17 @@ def store_candidate(con,set_id,slot,content,model):
                     (set_id,slot)).fetchone()
     version=int(row[0])+1
     con.execute('UPDATE question_candidates SET current=0 WHERE set_id=? AND slot=?',(set_id,slot))
-    cur=con.execute('INSERT INTO question_candidates(set_id,slot,version,content_json,model) VALUES(?,?,?,?,?)',
-        (set_id,slot,version,json.dumps(content,ensure_ascii=False),model))
+    # Legacy English-localisation builds mistakenly created a mandatory
+    # "ModelTEXT" column. Keep those existing tables writable without data loss.
+    columns={row[1] for row in con.execute('PRAGMA table_info(question_candidates)')}
+    if 'ModelTEXT' in columns:
+        cur=con.execute('INSERT INTO question_candidates(set_id,slot,version,content_json,model,"ModelTEXT") '
+            'VALUES(?,?,?,?,?,?)',
+            (set_id,slot,version,json.dumps(content,ensure_ascii=False),model,model))
+    else:
+        cur=con.execute('INSERT INTO question_candidates(set_id,slot,version,content_json,model) '
+            'VALUES(?,?,?,?,?)',
+            (set_id,slot,version,json.dumps(content,ensure_ascii=False),model))
     return cur.lastrowid
 
 
@@ -9708,65 +9748,69 @@ class NetworkWindow:
         window['status'].set('Stage 1/2:Generation in Progress 10  questions draft and automatic save ; Generate after completion will please you Settings review rounds .')
         def worker():
             try:
-                candidates, installed=available_ollama_models(model)
-                if model not in candidates:
-                    self.events.put(('v8_generation_status',(set_id,
-                        f' originalModelnot yet install ; use available fallback :{candidates[0]}.')))
+                candidates,installed=available_ollama_models(model)
                 with database() as con:
                     rows=con.execute('SELECT slot,content_json FROM question_candidates '
                         'WHERE set_id=? AND current=1 ORDER BY slot',(set_id,)).fetchall()
-                existing={slot:json.loads(raw) for slot,raw in rows}
+                existing={int(slot):json.loads(raw) for slot,raw in rows}
                 if len(existing)>=10:
-                    self.events.put(('v8_generation_ready',(set_id,len(existing))));return
-                names=[v.get('title','') for v in existing.values()]
-                failed=0
-                for slot in range(1,11):
-                    if slot in existing:continue
-                    if stopper.is_set():
-                        self.events.put(('v8_generation_cancelled',(set_id,len(existing))));return
-                    # Restartable at any slot: no need to regenerate preceding questions.
-                    def note(info, current=slot):
-                        self.events.put(('v8_generation_status',(set_id,
-                            f'✦  questions  {current}/10( Saved  {len(existing)}  questions )|'+info)))
-                    note(' preparing single questions please request :'+candidates[0]+'... '+ollama_runtime_notice(candidates[0]))
-                    problem=None
-                    errors=[]
-                    chosen_model=None
+                    self.events.put(('v8_generation_ready',(set_id,len(existing))))
+                    return
+                saved_titles={str(v.get('title','')).strip().casefold() for v in existing.values()}
+                missing=[slot for slot in range(1,11) if slot not in existing]
+                self.events.put(('v8_generation_status',(set_id,
+                    f'Ten independent draft lanes launched; Ollama inference limit '
+                    f'{_OLLAMA_PARALLEL_LIMIT} simultaneous request(s).')))
+                errors={}
+                def draft_slot(slot, excluded=()):
+                    last=[]
                     for option in candidates:
-                        if stopper.is_set():
-                            self.events.put(('v8_generation_cancelled',(set_id,len(existing))));return
-                        note(' use  '+option+'  generate #  '+str(slot)+'  questions ...')
+                        if stopper.is_set():raise InterruptedError('Stopped')
                         try:
-                            batch=generate_question_batch(option,context,paths,1,names,
-                                                          progress=lambda value,selected=option:note(
-                                                              selected+'｜'+value),
-                                                          cancel_event=stopper)
-                            if not batch:
-                                raise ValueError(' response Validate failed validation : missing specific Research objects or Conjecture to investigate ( can fromGenerationStatus View detailed reason )')
-                            problem=batch[0]; chosen_model=option
-                            break
+                            out=generate_question_batch(option,context,paths,1,
+                                existing_titles=tuple(excluded),slot_number=slot,
+                                progress=lambda detail:self.events.put(('v8_generation_status',
+                                    (set_id,f'Draft lane {slot}/10: '+str(detail)[:210]))),
+                                cancel_event=stopper)
+                            if not out:raise ValueError('Missing valid question')
+                            return slot,out[0],option
+                        except InterruptedError:raise
+                        except Exception as exc:last.append(f'{option}: {exc}')
+                    raise RuntimeError('; '.join(last)[-600:])
+                with ThreadPoolExecutor(max_workers=10,thread_name_prefix='FLIN-Draft') as pool:
+                    jobs={pool.submit(draft_slot,slot,tuple(saved_titles)):slot for slot in missing}
+                    for job in as_completed(jobs):
+                        slot=jobs[job]
+                        if stopper.is_set():break
+                        try:
+                            _,question,used=job.result()
+                            title=str(question.get('title','')).strip().casefold()
+                            # Parallel results can collide; rerun just that lane
+                            # against all titles actually persisted so far.
+                            if not title or title in saved_titles:
+                                _,question,used=draft_slot(slot,tuple(saved_titles))
+                                title=str(question.get('title','')).strip().casefold()
+                            if not title or title in saved_titles:
+                                raise ValueError('Duplicate question title after retry')
+                            with database() as con:
+                                with con:store_candidate(con,set_id,slot,question,used)
+                            saved_titles.add(title)
+                            existing[slot]=question
+                            self.events.put(('v8_generation_progress',(set_id,len(existing),used)))
                         except InterruptedError:
-                            self.events.put(('v8_generation_cancelled',(set_id,len(existing))));return
+                            stopper.set()
+                            break
                         except Exception as exc:
-                            errors.append(option+'：'+str(exc)[:180])
-                            self.events.put(('v8_generation_status',(set_id,
-                                '⚠ '+option+' GenerationFailed , try another already installModel; already Generate questions items NOT affected .')))
-                    if problem is None:
-                        self.events.put(('v8_generation_error',(set_id,
-                            f' #  {slot}  questions Generate failed validation , Preserved  {len(existing)}/10  questions .\n'
-                            +'\n'.join(errors)+'\n can click ` one by one questions Generate / Complete missing ten questions ` resume .'
-                            ' if for connection question Check  ollama ps; if for format question program already attempt automatic Repair .')))
-                        return
-                    with database() as con:
-                        with con:
-                            store_candidate(con,set_id,slot,problem,chosen_model)
-                    existing[slot]=problem
-                    names.append(problem.get('title',''))
-                    self.events.put(('v8_generation_progress',(set_id,len(existing),chosen_model)))
-                if len(existing)<10:
+                            errors[slot]=str(exc)[:300]
+                    if stopper.is_set():
+                        for job in jobs:job.cancel()
+                if stopper.is_set():
+                    self.events.put(('v8_generation_cancelled',(set_id,len(existing))))
+                elif errors or len(existing)!=10:
                     self.events.put(('v8_generation_error',(set_id,
-                        f' Saved  {len(existing)}/10  questions ; another with  {failed}  questions No return valid Content .'
-                        ' can points ` Generate / Complete missing ten questions ` Retry missing questions items .')))
+                        f'Saved {len(existing)}/10 drafts; failed slots: '+
+                        '; '.join(f'{slot}: {err}' for slot,err in sorted(errors.items()))[:900]+
+                        '. Retry to generate only the missing slots.')))
                 else:
                     self.events.put(('v8_generation_ready',(set_id,10)))
             except Exception as exc:
@@ -10234,131 +10278,82 @@ class NetworkWindow:
         self.question_model_activity(set_id,True,'Model: preparing research review ')
         state['iterate_btn'].configure(state='disabled')
         self.update_question_window(set_id)
-        state['status'].set(' high speed Workflow :Reviewintegrate Critique  → 4B incremental Revision  →  same imes review completed old and new difference Validate ; at most  '+str(maxround)+'  rounds .')
+        state['status'].set(f'10 independent review chains (Ollama model-call limit: {_OLLAMA_PARALLEL_LIMIT}). Each question reviews/revises and saves separately; up to '+str(maxround)+' rounds.')
         def worker():
             try:
-                # Batch by ROLE, not by question, to avoid 4B<->3B model swaps
-                # on every individual item. This is especially important with
-                # 4GB VRAM and models that cannot be resident simultaneously.
                 generator_candidates,_=available_ollama_models(generator)
                 judge_candidates,_=available_ollama_models(judge)
                 critic_candidates,_=available_ollama_models(critic)
                 self.events.put(('v7_iteration_progress',(set_id,
-                    ' fastModelrole allocation :Generation/ Revision  '+generator_candidates[0]+
-                    '| research review  '+judge_candidates[0]+
-                    '| concise Critique  '+critic_candidates[0]+ '( click role batches imes run )')))
+                    f'10 independent judge/revise lanes, {_OLLAMA_PARALLEL_LIMIT} '
+                    f'concurrent Ollama calls; each lane stores its own versions.')))
 
-                def stage(stage_name, options, function, *args, **kwargs):
-                    errors=[]
-                    for candidate in options:
-                        if stop_event.is_set():
-                            raise InterruptedError(' already require StopReview; first before Successful write Results already save .')
-                        self.events.put(('v7_iteration_progress',
-                            (set_id,stage_name+'：'+candidate+'…')))
+                def stage(slot,description,options,function,*args,**kwargs):
+                    failures=[]
+                    for option in options:
+                        if stop_event.is_set():raise InterruptedError('Stopped')
                         try:
-                            value=function(candidate,*args,**kwargs,
-                                progress=lambda info: self.events.put(('v7_iteration_progress',
-                                    (set_id,stage_name+'｜'+info))),
-                                cancel_event=stop_event)
-                            return value,candidate
-                        except InterruptedError:
-                            raise
+                            return (function(option,*args,**kwargs,
+                                progress=lambda msg:self.events.put(('v7_iteration_progress',
+                                    (set_id,f'Lane {slot}/10 | {description}: {msg}'))),
+                                cancel_event=stop_event),option)
+                        except InterruptedError:raise
                         except Exception as exc:
-                            errors.append(candidate+': '+str(exc)[:240])
-                            self.events.put(('v7_iteration_progress',
-                                (set_id,'⚠ '+candidate+'  process Failed , attempt already install another one items smallModel.')))
-                    raise RuntimeError(stage_name+'  CandidateModelall Failed :\n'+'\n'.join(errors))
+                            failures.append(f'{option}: {exc}')
+                    raise RuntimeError(f'Lane {slot}/10 {description} failed: '+
+                                       '; '.join(failures)[-700:])
 
-                # On restart reuse saved evaluator/critic responses by candidate ID.
-                # A candidate's version bounds the number of allowed revisions,
-                # so stopping/resuming will not silently exceed maxround.
-                # Record isolated revision failures instead of aborting the
-                # entire 10-question workset at the first malformed response.
-                # Unresolved failures keep the workset paused (drafts hidden)
-                # so resuming can retry just the failed candidate versions.
-                unresolved_revisions={}
-                def progress_step(cycle,phase,done,total,slot=0):
-                    self.events.put(('v7_iteration_stage',
-                        (set_id,cycle,maxround,phase,done,total,slot)))
-                for cycle in range(1,maxround+1):
-                    if stop_event.is_set():break
-                    to_review=[]
+                def write_verdict(cid,verdict,used):
                     with database() as con:
-                        rows=con.execute('''SELECT id,slot,version,content_json
-                            FROM question_candidates WHERE set_id=? AND current=1
-                            ORDER BY slot''',(set_id,)).fetchall()
-                        for cid,slot,version,raw in rows:
-                            if slot<1 or slot>10:continue
-                            q=json.loads(raw)
-                            prior=con.execute('''SELECT score,comment,rubric_json FROM question_feedback
-                                WHERE candidate_id=? AND role='evaluator' AND score IS NOT NULL
+                        with con:
+                            save_feedback(con,cid,'evaluator',verdict['score'],
+                                          verdict['critique'],verdict['rubric'],used)
+                            if 'difference' in verdict:
+                                delta=verdict['difference']
+                                save_feedback(con,cid,'difference',
+                                    1 if delta['accepted'] else 0,
+                                    'Resolved: '+delta['fixed']+'; remaining: '+delta['remaining']+
+                                    '; new issues: '+delta['new_errors']+'; '+delta['reason'],
+                                    delta,used)
+
+                def review_slot(slot):
+                    for cycle in range(1,maxround+1):
+                        if stop_event.is_set():raise InterruptedError('Stopped')
+                        with database() as con:
+                            row=con.execute('''SELECT id,version,content_json FROM
+                                question_candidates WHERE set_id=? AND slot=? AND current=1
+                                ORDER BY version DESC LIMIT 1''',(set_id,slot)).fetchone()
+                            if not row:raise RuntimeError(f'Missing draft for slot {slot}')
+                            cid,version,raw=row
+                            question=json.loads(raw)
+                            prior=con.execute('''SELECT score,comment,rubric_json
+                                FROM question_feedback WHERE candidate_id=?
+                                AND role='evaluator' AND score IS NOT NULL
                                 ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
-                            prior_question,prior_review=previous_question_review(
+                            previous_question,previous_review=previous_question_review(
                                 con,set_id,slot,version)
-                            to_review.append({'cid':cid,'slot':slot,'version':version,
-                                              'question':q,'prior':prior,
-                                              'previous_question':prior_question,
-                                              'previous_review':prior_review})
-                    if len(to_review)<10:
-                        raise RuntimeError('Reviewmissing questions items ; Please first Complete missing ten questions .')
-                    pending=[]
-                    progress_step(cycle,'judge',0,len(to_review))
-                    # All reviewers run together (4B), then all critics (3B),
-                    # then all revisers (4B): two swaps per round, not per item.
-                    for review_idx,item in enumerate(to_review,1):
-                        if stop_event.is_set():break
-                        slot=item['slot'];cid=item['cid'];q=item['question']
-                        old=item['prior']
-                        if old and item['previous_question'] is not None:
-                            with database() as con:
-                                exists_diff=con.execute('''SELECT 1 FROM question_feedback
-                                    WHERE candidate_id=? AND role='difference' LIMIT 1''',
-                                    (cid,)).fetchone()
-                            if not exists_diff:
-                                old=None   # one integrated review fills legacy difference audit
-                        if old:
-                            try:rubric=json.loads(old[2] or '{}')
-                            except (ValueError,TypeError):rubric={}
-                            verdict={'score':int(old[0]),'critique':str(old[1] or ''),
-                                     'rubric':rubric}
-                            if item['previous_question'] is not None:
-                                with database() as con:
-                                    prev_delta=con.execute('''SELECT rubric_json FROM question_feedback
-                                        WHERE candidate_id=? AND role='difference'
-                                        ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
-                                if prev_delta:
-                                    try:verdict['difference']=json.loads(prev_delta[0])
-                                    except (ValueError,TypeError):pass
+                            diff=con.execute('''SELECT rubric_json FROM question_feedback
+                                WHERE candidate_id=? AND role='difference'
+                                ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
+                        if prior and (previous_question is None or diff is not None):
+                            try:rubric=json.loads(prior[2] or '{}')
+                            except (TypeError,ValueError):rubric={}
+                            verdict={'score':int(prior[0]),
+                                     'critique':str(prior[1] or ''),'rubric':rubric}
+                            if diff:
+                                try:verdict['difference']=json.loads(diff[0])
+                                except (TypeError,ValueError):pass
                         else:
                             self.events.put(('v7_iteration_progress',(set_id,
-                                f' #  {cycle}/{maxround}  rounds |Reviewquestions  {slot}/10 ...')))
-                            verdict,used=stage(' research review ＋ version differences Validate ',judge_candidates,
-                                               judge_question,q,context,
-                                               prior_question=item['previous_question'],
-                                               prior_review=item['previous_review'])
-                            with database() as con:
-                                with con:
-                                    save_feedback(con,cid,'evaluator',verdict['score'],
-                                        verdict['critique'],verdict['rubric'],used)
-                                    if 'difference' in verdict:
-                                        d=verdict['difference']
-                                        save_feedback(con,cid,'difference',
-                                            1 if d['accepted'] else 0,
-                                            ' already Repair :'+d['fixed']+'; still insufficient :'+d['remaining']+
-                                            '; new issues :'+d['new_errors']+';'+d['reason'],
-                                            d,used)
+                                f'Lane {slot}/10: review round {cycle}/{maxround}')))
+                            verdict,used=stage(slot,'Review',judge_candidates,
+                                judge_question,question,context,
+                                prior_question=previous_question,
+                                prior_review=previous_review)
+                            write_verdict(cid,verdict,used)
                         self.events.put(('v7_iteration_update',(set_id,slot,verdict['score'])))
-                        progress_step(cycle,'judge',review_idx,len(to_review),slot)
-                        if verdict['score']<100 and item['version']<maxround:
-                            pending.append((item,verdict))
-                    if stop_event.is_set() or not pending:
-                        break
-                    # Critic stage: all ten (or fewer) concise JSON critiques
-                    critiques=[]
-                    progress_step(cycle,'critic',0,len(pending))
-                    for critique_idx,(item,verdict) in enumerate(pending,1):
-                        if stop_event.is_set():break
-                        slot=item['slot'];cid=item['cid']
+                        if verdict['score']>=100 or version>=maxround:
+                            break
                         with database() as con:
                             old=con.execute('''SELECT comment FROM question_feedback
                                 WHERE candidate_id=? AND role='critic' AND comment!=''
@@ -10366,93 +10361,49 @@ class NetworkWindow:
                         if old:
                             suggestion=old[0]
                         else:
-                            self.events.put(('v7_iteration_progress',(set_id,
-                                f' #  {cycle}/{maxround}  rounds | Critique questions  {slot}/10 ...')))
                             suggestion=(None if os.environ.get('BRAIN_USE_SEPARATE_CRITIC','0')=='1'
                                         else quick_critic_from_review(verdict))
                             if suggestion:
-                                used=' integrateReviewCritique ( NOT Add reasoning please request )'
-                                self.events.put(('v7_iteration_progress',(set_id,
-                                    f' questions  {slot}/10  reuseReviewspecific modify recommendation , save one imesModelcall .')))
+                                used='integrated-review-critique'
                             else:
-                                suggestion,used=stage(' Independent Critique recommendation ',critic_candidates,
-                                    critique_question,item['question'],verdict)
+                                suggestion,used=stage(slot,'Critique',critic_candidates,
+                                    critique_question,question,verdict)
                             with database() as con:
                                 with con:save_feedback(con,cid,'critic',None,suggestion,model=used)
-                        critiques.append((item,verdict,suggestion))
-                        progress_step(cycle,'critic',critique_idx,len(pending),slot)
-                    if stop_event.is_set():break
-                    # Author/reviser stage, 4B. Commit each revision immediately.
-                    progress_step(cycle,'revise',0,len(critiques))
-                    for revise_idx,(item,verdict,suggestion) in enumerate(critiques,1):
-                        if stop_event.is_set():break
-                        slot=item['slot']
-                        self.events.put(('v7_iteration_progress',(set_id,
-                            f' #  {cycle}/{maxround}  rounds | Revision questions  {slot}/10 ...')))
+                        if stop_event.is_set():raise InterruptedError('Stopped')
                         try:
-                            revised,used=stage(' question revision ',generator_candidates,
-                                revise_question,item['question'],verdict,suggestion,context)
-                        except InterruptedError:
-                            raise
+                            revised,used=stage(slot,'Revision',generator_candidates,
+                                revise_question,question,verdict,suggestion,context)
+                        except InterruptedError:raise
                         except Exception as exc:
-                            # A failed revision must never overwrite an
-                            # already reviewed, valid question. Continue the
-                            # other slots, then leave this set resumable.
-                            detail=str(exc)[:900]
-                            unresolved_revisions[slot]=detail
                             with database() as con:
-                                with con:save_feedback(con,item['cid'],'revision_error',
-                                    None,detail,model='ollama')
-                            self.events.put(('v7_iteration_progress',(set_id,
-                                f'⚠  questions  {slot}/10  Revision Failed , oldVersionPreserved ; resume its they questions .'+detail[:135])))
-                            progress_step(cycle,'revise',revise_idx,len(critiques),slot)
-                            continue
+                                with con:save_feedback(con,cid,'revision_error',None,
+                                    str(exc)[:900],model='ollama')
+                            raise
                         with database() as con:
                             with con:store_candidate(con,set_id,slot,revised,used)
-                        unresolved_revisions.pop(slot,None)
                         self.events.put(('v7_iteration_update',(set_id,slot,None)))
-                        progress_step(cycle,'revise',revise_idx,len(critiques),slot)
-                if stop_event.is_set():
-                    raise InterruptedError(' Stop and save ')
-                # Any newly revised version must itself get a score. Normally
-                # the next cycle evaluates it, but after interruption/restart we
-                # can encounter partially completed stages; ensure coverage.
-                with database() as con:
-                    rows=con.execute('''SELECT q.id,q.slot,q.content_json FROM question_candidates q
-                        WHERE q.set_id=? AND q.current=1 AND NOT EXISTS (
-                        SELECT 1 FROM question_feedback f WHERE f.candidate_id=q.id
-                           AND f.role='evaluator' AND f.score IS NOT NULL)
-                        ORDER BY q.slot''',(set_id,)).fetchall()
-                progress_step(maxround,'final',0,len(rows))
-                for final_idx,(cid,slot,raw) in enumerate(rows,1):
-                    if stop_event.is_set():raise InterruptedError(' Stop and save ')
-                    self.events.put(('v7_iteration_progress',(set_id,
-                        f' final verification questions  {slot}/10: ensure RevisionVersionwith correct formula score ...')))
+                    if stop_event.is_set():raise InterruptedError('Stopped')
+                    # A revised candidate must be evaluated even if it was
+                    # produced in the final allowed round.
                     with database() as con:
-                        row_meta=con.execute('''SELECT slot,version FROM question_candidates
-                            WHERE id=?''',(cid,)).fetchone()
-                        earlier,earlier_review=previous_question_review(
-                            con,set_id,row_meta[0],row_meta[1]) if row_meta else (None,None)
-                    verdict,used=stage(' finalReview＋ difference Validate ',judge_candidates,
-                        judge_question,json.loads(raw),context,
-                        prior_question=earlier,prior_review=earlier_review)
+                        current=con.execute('''SELECT id,version,content_json FROM
+                            question_candidates WHERE set_id=? AND slot=? AND current=1''',
+                            (set_id,slot)).fetchone()
+                        already=con.execute('''SELECT 1 FROM question_feedback
+                            WHERE candidate_id=? AND role='evaluator' AND score IS NOT NULL
+                            LIMIT 1''',(current[0],)).fetchone()
+                        prev,prev_review=previous_question_review(
+                            con,set_id,slot,current[1]) if not already else (None,None)
+                    if not already:
+                        verdict,used=stage(slot,'Final verification',judge_candidates,
+                            judge_question,json.loads(current[2]),context,
+                            prior_question=prev,prior_review=prev_review)
+                        write_verdict(current[0],verdict,used)
+                    # Preserve all candidate versions; select only a version
+                    # with a recorded evaluation and acceptable revision audit.
                     with database() as con:
-                        with con:
-                            save_feedback(con,cid,'evaluator',verdict['score'],
-                                          verdict['critique'],verdict['rubric'],used)
-                            if 'difference' in verdict:
-                                d=verdict['difference']
-                                save_feedback(con,cid,'difference',
-                                    1 if d['accepted'] else 0,
-                                    ' already Repair :'+d['fixed']+'; still insufficient :'+d['remaining']+
-                                    '; new issues :'+d['new_errors']+';'+d['reason'],d,used)
-                    progress_step(maxround,'final',final_idx,len(rows),slot)
-                # Choose the BEST evaluated candidate for each slot. All other
-                # versions and review history remain permanently in SQLite.
-                progress_step(maxround,'select',0,10)
-                for slot in range(1,11):
-                    with database() as con:
-                        ranked=con.execute('''SELECT q.id,MAX(f.score) AS best_score
+                        best=con.execute('''SELECT q.id,MAX(f.score) AS best_score
                             FROM question_candidates q JOIN question_feedback f
                             ON f.candidate_id=q.id
                             WHERE q.set_id=? AND q.slot=? AND f.role='evaluator'
@@ -10462,19 +10413,46 @@ class NetworkWindow:
                                 AND d.score=1))
                             GROUP BY q.id ORDER BY best_score DESC,q.version ASC LIMIT 1''',
                             (set_id,slot)).fetchone()
-                        if ranked:
-                            with con:
-                                con.execute('UPDATE question_candidates SET current=0 WHERE set_id=? AND slot=?',
-                                            (set_id,slot))
-                                con.execute('UPDATE question_candidates SET current=1 WHERE id=?',(ranked[0],))
-                            self.events.put(('v7_iteration_update',(set_id,slot,ranked[1])))
-                    progress_step(maxround,'select',slot,10,slot)
-                if unresolved_revisions:
-                    details=';'.join(f' questions {slot}: {err[:140]}' for slot,err in
-                                     sorted(unresolved_revisions.items()))
-                    raise RuntimeError(f'{len(unresolved_revisions)}  questions Revision still Failed , its they questions items already save .'
-                        f' question set keep pause for resumption :{details[:700]}')
-                self.events.put(('v7_iteration_done',(set_id,False,None)))
+                        if not best:
+                            raise RuntimeError(f'Lane {slot}: no evaluated, acceptable candidate')
+                        with con:
+                            con.execute('UPDATE question_candidates SET current=0 '
+                                        'WHERE set_id=? AND slot=?',(set_id,slot))
+                            con.execute('UPDATE question_candidates SET current=1 WHERE id=?',(best[0],))
+                    self.events.put(('v7_iteration_update',(set_id,slot,best[1])))
+                    return slot
+
+                completed=set();problems={};cancelled=False
+                with ThreadPoolExecutor(max_workers=10,thread_name_prefix='FLIN-Review') as pool:
+                    futures={pool.submit(review_slot,slot):slot for slot in range(1,11)}
+                    for future in as_completed(futures):
+                        slot=futures[future]
+                        try:
+                            future.result()
+                            completed.add(slot)
+                            self.events.put(('v7_iteration_stage',
+                                (set_id,maxround,maxround,'final',len(completed),10,slot)))
+                            self.events.put(('v7_iteration_progress',(set_id,
+                                f'Completed {len(completed)}/10 independent review lanes.')))
+                        except InterruptedError:
+                            cancelled=True
+                        except Exception as exc:
+                            problems[slot]=str(exc)[:380]
+                            self.events.put(('v7_iteration_progress',(set_id,
+                                f'Lane {slot} paused: {str(exc)[:180]}')))
+                        if stop_event.is_set():
+                            cancelled=True
+                            for pending in futures:pending.cancel()
+                if cancelled or stop_event.is_set():
+                    self.events.put(('v7_iteration_done',(set_id,True,None)))
+                elif problems:
+                    detail='; '.join(f'{slot}: {err}' for slot,err in sorted(problems.items()))
+                    self.events.put(('v7_iteration_done',(set_id,True,detail[:1100])))
+                else:
+                    drafted,reviewed=question_pipeline_counts(set_id)
+                    if (drafted,reviewed)!=(10,10):
+                        raise RuntimeError('Not all ten final questions have recorded evaluations.')
+                    self.events.put(('v7_iteration_done',(set_id,False,None)))
             except InterruptedError:
                 self.events.put(('v7_iteration_done',(set_id,True,None)))
             except Exception as exc:
