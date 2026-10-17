@@ -40,7 +40,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-efficiency-report','--flin-dynamics-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -80,7 +80,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intellegence Network | Association Dynamics Space"
+APP_TITLE = "FLIN — Feature-Link Intellegence Network | Efficiency-Aware v19.0"
 
 
 def detect_cpu_resources():
@@ -1120,7 +1120,7 @@ def database(path=None) -> sqlite3.Connection:
                 query TEXT NOT NULL,
                 paths_json TEXT NOT NULL,
                 problem TEXT NOT NULL DEFAULT '',
-               model TEXT NOT NULL DEFAULT '',
+               ModelTEXT NOT NULL DEFAULT '',
                 created TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS positions(
@@ -1160,7 +1160,7 @@ def database(path=None) -> sqlite3.Connection:
                 slot INTEGER NOT NULL,
                 version INTEGER NOT NULL,
                 content_json TEXT NOT NULL,
-               model TEXT NOT NULL,
+               ModelTEXT NOT NULL,
                 current INTEGER NOT NULL DEFAULT 1,
                 created TEXT DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(set_id,slot,version)
@@ -1170,7 +1170,7 @@ def database(path=None) -> sqlite3.Connection:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 candidate_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
-               model TEXT NOT NULL DEFAULT '',
+               ModelTEXT NOT NULL DEFAULT '',
                 score INTEGER,
                 comment TEXT NOT NULL DEFAULT '',
                 rubric_json TEXT NOT NULL DEFAULT '{}',
@@ -1236,7 +1236,6 @@ EXPORT_PROVENANCE_TABLES = (
     'purity_prune_queue', 'purity_deleted_log',
     'abc_evidence','abc_learning_events','abc_runs','abc_pulse_events','abc_feedback',
     'abc_sources','abc_source_topics','abc_topics','abc_positions','flin_source_depth',
-     'flin_pulse_trace','flin_dynamics_meta',
     'abc_input_clusters','abc_cluster_features','abc_cluster_links','abc_replay_queue',
     'flin_patterns','flin_pattern_evidence','flin_shortcut_members','flin_cost_decisions',
 )
@@ -7073,32 +7072,6 @@ def abc_schema(con):
           end_unit TEXT NOT NULL, reason TEXT NOT NULL,
           time_s REAL NOT NULL
         );
-        -- Observation-only, lossless events; never used by the pulse router.
-        -- Historical abc_pulse_events without pulse_id are NOT reconstructed.
-        CREATE TABLE IF NOT EXISTS flin_pulse_trace(
-          run_id INTEGER NOT NULL, pulse_id INTEGER NOT NULL,
-          gate TEXT NOT NULL, step_index INTEGER NOT NULL,
-          unit_id TEXT NOT NULL, previous_unit TEXT,
-          selected_next_unit TEXT, simulation_time REAL NOT NULL,
-          terminal_reason TEXT,
-          eligible_count INTEGER NOT NULL DEFAULT 0,
-          branch_entropy REAL NOT NULL DEFAULT 0,
-          max_exit_probability REAL NOT NULL DEFAULT 0,
-          chosen_probability REAL NOT NULL DEFAULT 0,
-          PRIMARY KEY(run_id,pulse_id,step_index)
-        );
-        CREATE INDEX IF NOT EXISTS idx_flin_trace_run_time
-          ON flin_pulse_trace(run_id,simulation_time,pulse_id,step_index);
-        CREATE INDEX IF NOT EXISTS idx_flin_trace_run_unit
-          ON flin_pulse_trace(run_id,unit_id,gate);
-        CREATE TABLE IF NOT EXISTS flin_dynamics_meta(
-          run_id INTEGER PRIMARY KEY,
-          trace_version INTEGER NOT NULL DEFAULT 1,
-          d_ref INTEGER NOT NULL, k_ref INTEGER NOT NULL,
-          graph_units INTEGER NOT NULL, graph_links INTEGER NOT NULL,
-          note TEXT NOT NULL DEFAULT 'Observed pulse events; no physical feedback tree',
-          created TEXT DEFAULT CURRENT_TIMESTAMP
-        );
         -- Original online input clusters, independent of the provenance graph.
         CREATE TABLE IF NOT EXISTS abc_input_clusters(
           id TEXT PRIMARY KEY, paper_id TEXT NOT NULL,
@@ -7859,7 +7832,7 @@ def abc_integrated_response(event_times, duration, window, threshold):
     return raw_area/duration,visible_area/duration
 
 
-def flin_weighted_exit(con, current, previous, visited, max_revisits, rng, cache, observer=None):
+def flin_weighted_exit(con, current, previous, visited, max_revisits, rng, cache):
     """Draw exactly one eligible outgoing directed edge with P(edge)=w/sum(w).
 
     No extra probability-of-transmission roll or pulse attenuation. The known
@@ -7882,320 +7855,14 @@ def flin_weighted_exit(con, current, previous, visited, max_revisits, rng, cache
     else:
         choices=stored
     chosen=None;total=0.0
-    count=0;weighted_log_sum=0.0;maximum=0.0
     for dst,weight,label in choices:
         if dst==previous or visited[dst]>=max_revisits:continue
         strength=float(weight)
         if not math.isfinite(strength) or strength<=0:continue
         total+=strength
-        if observer is not None:
-            count+=1
-            weighted_log_sum+=strength*math.log(strength)
-            maximum=max(maximum,strength)
         if rng.random()*total<strength:
             chosen=(dst,strength,label)
-    if observer is not None:
-        entropy=(max(0.,math.log(total)-weighted_log_sum/total)
-                 if count>=2 and total>0 else 0.)
-        observer(count,entropy,maximum/total if total else 0.,
-                 chosen[1]/total if chosen and total else 0.)
     return chosen
-
-
-def flin_dynamics_graph_reference(con):
-    """Full active graph degrees at simulation time; no overview sampling."""
-    units=con.execute("SELECT COUNT(*) FROM abc_units WHERE status='active'").fetchone()[0]
-    links=con.execute("""SELECT COUNT(*) FROM abc_edges e
-        JOIN abc_units src ON src.id=e.src AND src.status='active'
-        JOIN abc_units dst ON dst.id=e.dst AND dst.status='active'
-        WHERE e.weight>0 AND e.weight<1e100""").fetchone()[0]
-    k=con.execute("""SELECT MAX(outdegree) FROM (
-        SELECT COUNT(*) AS outdegree FROM abc_edges e
-        JOIN abc_units src ON src.id=e.src AND src.status='active'
-        JOIN abc_units dst ON dst.id=e.dst AND dst.status='active'
-        WHERE e.weight>0 AND e.weight<1e100 GROUP BY e.src)""").fetchone()[0]
-    return max(2,int(k or 0)),int(units),int(links)
-
-
-def flin_dynamics_statistics(events, feedback, d_ref, k_ref, gate='All'):
-    """Per-visit event statistics, with feedback initiation not delivery."""
-    metrics={}
-    for row in events:
-        pulse_id,g,step,uid,previous,nxt,t,reason,count,entropy,max_p,chosen_p=row
-        if gate!='All' and g!=gate:continue
-        state=metrics.setdefault(uid,dict(visits=0,depth_sum=0.,entropy_sum=0.,
-                eligible_sum=0,branch_effective_sum=0.,max_probability_sum=0.,clipped_depth_sum=0.,
-                selected_probability_sum=0.,selected_count=0,feedback=0,guard=0))
-        state['visits']+=1
-        state['depth_sum']+=float(step)
-        state['clipped_depth_sum']+=min(float(step),d_ref)
-        state['entropy_sum']+=float(entropy)
-        state['eligible_sum']+=int(count)
-        state['branch_effective_sum']+=math.exp(float(entropy))
-        state['max_probability_sum']+=float(max_p)
-        if nxt is not None:
-            state['selected_probability_sum']+=float(chosen_p)
-            state['selected_count']+=1
-        # Each pulse contributes precisely one terminal visit.
-        if reason=='no_eligible_exit':state['feedback']+=1
-        elif reason=='max_steps_guard':state['guard']+=1
-    denominator=math.log(max(2,int(k_ref)))
-    for uid,v in metrics.items():
-        n=v['visits']
-        v['mean_depth']=v['depth_sum']/n
-        # Clamp only the normalized coordinate, not the retained raw mean.
-        v['X']=v['clipped_depth_sum']/(n*d_ref)
-        v['mean_entropy']=v['entropy_sum']/n
-        v['Y']=min(1.,max(0.,v['mean_entropy']/denominator))
-        v['Z']=v['feedback']/n
-        v['mean_eligible']=v['eligible_sum']/n
-        v['effective_branches']=math.exp(v['mean_entropy'])
-        v['mean_per_visit_effective_branches']=v['branch_effective_sum']/n
-        v['max_exit_probability']=v['max_probability_sum']/n
-        v['chosen_probability']=v['selected_probability_sum']/v['selected_count'] if v['selected_count'] else None
-    return metrics
-
-
-def flin_dynamics_network_shape(con, display_ids=(), *, run_id=None):
-    """Assign a reproducible research-space position to EVERY active memory.
-
-    A pulse-unvisited memory has no measured propagation/feedback statistics.
-    Such memories receive EXPLICITLY MARKED graph-derived structural proxies:
-    shortest directed depth from observed gate/natural root (X), full positive-
-    weight outgoing entropy (Y), and a dead-end indicator (Z). The latter is
-    *not* a feedback initiation rate. Measured pulse values are substituted
-    ONLY for units actually visited in the selected traced run.
-
-    Snapshot analysis uses the FULL directed graph; the viewport sample is used
-    only when selecting which already-computed coordinates to render. No graph,
-    learning weight, simulation trace or abc_positions row is modified.
-    """
-    from collections import deque
-    abc_schema(con)
-    if run_id is None:
-        record=con.execute('''SELECT r.id FROM abc_runs r
-          JOIN flin_dynamics_meta m ON m.run_id=r.id
-          WHERE EXISTS(SELECT 1 FROM flin_pulse_trace t WHERE t.run_id=r.id)
-          ORDER BY r.id DESC LIMIT 1''').fetchone()
-        run_id=int(record[0]) if record else None
-    meta=(con.execute('SELECT d_ref,k_ref,graph_units,graph_links '
-                      'FROM flin_dynamics_meta WHERE run_id=?',(run_id,)).fetchone()
-          if run_id is not None else None)
-    d_ref=max(1,int(meta[0])) if meta else 32
-    # Iterate the entire active graph once. This is deliberately independent of
-    # the 3D renderer's edge/node budget and happens on a background worker.
-    active=[uid for (uid,) in con.execute("SELECT id FROM abc_units WHERE status='active'")]
-    nodes=set(active)
-    del active
-    outgoing={}
-    indegree=dict.fromkeys(nodes,0)
-    sums={};log_sums={};degree={}
-    links=0
-    for src,dst,weight in con.execute('''SELECT e.src,e.dst,e.weight FROM abc_edges e
-      JOIN abc_units u ON u.id=e.src AND u.status='active'
-      JOIN abc_units v ON v.id=e.dst AND v.status='active'
-      WHERE e.weight>0 AND e.weight<1e100'''):
-        w=float(weight)
-        if not math.isfinite(w) or w<=0:continue
-        outgoing.setdefault(src,[]).append(dst)
-        indegree[dst]+=1
-        sums[src]=sums.get(src,0.)+w
-        log_sums[src]=log_sums.get(src,0.)+w*math.log(w)
-        degree[src]=degree.get(src,0)+1
-        links+=1
-    k_current=max(2,max(degree.values(),default=0))
-    k_ref=max(2,int(meta[1])) if meta else k_current
-    ln_k=math.log(k_ref)
-    gate_ids=[]
-    if run_id is not None:
-        row=con.execute('SELECT result_json FROM abc_runs WHERE id=?',(run_id,)).fetchone()
-        if row:
-            try:
-                result=json.loads(row[0]);gate_ids=[item['id'] for item in result.get('matched',[])
-                     if isinstance(item,dict) and item.get('id') in nodes]
-            except (ValueError,TypeError,KeyError):pass
-    # Natural origins prevent unrelated branches from being arbitrarily placed
-    # relative to one chosen pulse gate. In closed cycles without a graph root,
-    # the lexicographically first unreached memory is a deterministic seed.
-    roots=list(dict.fromkeys(gate_ids+sorted(uid for uid,n in indegree.items() if n==0)))
-    distance={}; queue=deque()
-    def push_root(uid):
-        if uid not in distance:
-            distance[uid]=0;queue.append(uid)
-    for uid in roots:push_root(uid)
-    def traverse():
-        while queue:
-            src=queue.popleft();step=distance[src]+1
-            for dst in outgoing.get(src,()):
-                if dst not in distance:
-                    distance[dst]=step;queue.append(dst)
-    traverse()
-    for uid in sorted(nodes):
-        if uid not in distance:
-            push_root(uid);traverse()
-    # Full-graph source probabilities. These are *potential* branching values;
-    # visited-node Y instead uses the actually eligible exit set per visit.
-    positions={}; stats={}
-    displayed=set(display_ids)
-    for uid in nodes:
-        n=degree.get(uid,0);total=sums.get(uid,0.)
-        entropy=max(0.,math.log(total)-log_sums[uid]/total) if n>=2 and total>0 else 0.
-        d=distance[uid]
-        x=min(d,d_ref)/d_ref
-        y=max(0.,min(1.,entropy/ln_k))
-        z=1. if n==0 else 0.
-        positions[uid]=(x,y,z)
-        if uid in displayed:
-            stats[uid]={'X':x,'Y':y,'Z':z,'visits':0,
-                'mean_depth':None,'structural_depth':d,'mean_entropy':None,
-                'structural_entropy':entropy,'mean_eligible':None,'structural_outdegree':n,
-                'effective_branches':math.exp(entropy),
-                'max_exit_probability':None,'chosen_probability':None,
-                'feedback':None,'guard':None,'source':'structural_estimate',
-                'z_definition':'Directed dead-end indicator, NOT observed feedback rate'}
-    # Merge measured values from every stored visit; no LIMIT or UI sampling.
-    observed=0;visits=0
-    if run_id is not None:
-        rows=con.execute('''SELECT unit_id,COUNT(*),SUM(step_index),
-            SUM(CASE WHEN step_index>? THEN ? ELSE step_index END),
-            SUM(branch_entropy),SUM(eligible_count),SUM(max_exit_probability),
-            SUM(CASE WHEN selected_next_unit IS NOT NULL THEN chosen_probability ELSE 0 END),
-            SUM(CASE WHEN selected_next_unit IS NOT NULL THEN 1 ELSE 0 END),
-            SUM(CASE WHEN terminal_reason='no_eligible_exit' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN terminal_reason='max_steps_guard' THEN 1 ELSE 0 END)
-            FROM flin_pulse_trace WHERE run_id=? GROUP BY unit_id''',(d_ref,d_ref,run_id))
-        for uid,n,depth,clipped,ent,eligible,maxprob,chosen,chosen_n,fb,guard in rows:
-            if uid not in nodes:continue
-            n=int(n);observed+=1;visits+=n
-            h=float(ent or 0.)/n
-            x=float(clipped or 0.)/(n*d_ref)
-            y=min(1.,max(0.,h/ln_k))
-            z=int(fb or 0)/n
-            positions[uid]=(x,y,z)
-            if uid in displayed:
-                stats[uid]={'X':x,'Y':y,'Z':z,'visits':n,
-                    'mean_depth':float(depth or 0.)/n,'structural_depth':distance[uid],
-                    'mean_entropy':h,'structural_entropy':None,
-                    'mean_eligible':float(eligible or 0.)/n,
-                    'structural_outdegree':degree.get(uid,0),
-                    'effective_branches':math.exp(h),
-                    'max_exit_probability':float(maxprob or 0.)/n,
-                    'chosen_probability':(float(chosen or 0.)/int(chosen_n) if chosen_n else None),
-                    'feedback':int(fb or 0),'guard':int(guard or 0),
-                    'source':'observed','z_definition':'Observed no_eligible_exit per visit'}
-    # Keep every underlying node in the computed coordinate system, even when
-    # a viewport renders only a bounded sample. Report exact sampling counts.
-    return {'run_id':run_id,'d_ref':d_ref,'k_ref':k_ref,'graph_units':len(nodes),
-            'graph_links':links,'positions':positions,'stats':stats,
-            'visited_count':observed,'trace_count':visits,
-            'estimated_count':len(nodes)-observed,'display_count':len(display_ids),
-            'root_count':len(roots),'full_graph':True,
-            'note':'Structural fallback is NOT a measured run statistic.'}
-
-
-def flin_dynamics_load(con, run_id, *, render_limit=450, edge_limit=300):
-    """Read immutable historical trace. Legacy runs are labeled insufficient."""
-    abc_schema(con)
-    row=con.execute('SELECT query,settings_json FROM abc_runs WHERE id=?',(int(run_id),)).fetchone()
-    if not row:raise ValueError('Simulation run not found.')
-    meta=con.execute("""SELECT d_ref,k_ref,graph_units,graph_links
-        FROM flin_dynamics_meta WHERE run_id=?""",(int(run_id),)).fetchone()
-    if not meta:
-        return dict(legacy=True,run_id=int(run_id),query=row[0],
-                    message='Legacy / Insufficient Trace: pulse identity and visit order were not recorded.')
-    rows=con.execute("""SELECT pulse_id,gate,step_index,unit_id,previous_unit,
-        selected_next_unit,simulation_time,terminal_reason,eligible_count,
-        branch_entropy,max_exit_probability,chosen_probability
-        FROM flin_pulse_trace WHERE run_id=? ORDER BY simulation_time,pulse_id,step_index""",
-        (int(run_id),)).fetchall()
-    if not rows:return dict(legacy=True,run_id=int(run_id),query=row[0],
-            message='Insufficient Trace: the run has no complete pulse events.')
-    all_stats=flin_dynamics_statistics(rows,None,int(meta[0]),int(meta[1]))
-    gate_rows=defaultdict(list)
-    gate_indices=defaultdict(list)
-    first_visit={'All':{}}
-    terminals={'All':{'feedback':[],'guard':[]}}
-    visit_examples=defaultdict(list)
-    pulse_origins={}
-    pulse_indices=defaultdict(list)
-    # Verify transitions by pulse identity, input gate and consecutive step.
-    next_by_index={}
-    previous_by_pulse={}
-    for index,record in enumerate(rows):
-        previous_index=previous_by_pulse.get(record[0])
-        if previous_index is not None:
-            previous_row=rows[previous_index]
-            if (previous_row[1]==record[1] and previous_row[2]+1==record[2]
-                    and previous_row[5]==record[3] and record[4]==previous_row[3]
-                    and previous_row[7] is None and record[6]>=previous_row[6]):
-                next_by_index[previous_index]=index
-        previous_by_pulse[record[0]]=index
-        pulse_indices[record[0]].append(index)
-        gate_name=record[1];uid=record[3]
-        gate_rows[gate_name].append(record)
-        gate_indices[gate_name].append(index)
-        if record[2]==0:pulse_origins[record[0]]=uid
-        first_visit['All'].setdefault(uid,index)
-        first_visit.setdefault(gate_name,{}).setdefault(uid,index)
-        if len(visit_examples[uid])<80:visit_examples[uid].append(record)
-        kind=('feedback' if record[7]=='no_eligible_exit'
-              else 'guard' if record[7]=='max_steps_guard' else None)
-        if kind:
-            terminals['All'][kind].append(index)
-            terminals.setdefault(gate_name,{'feedback':[],'guard':[]})[kind].append(index)
-    gates=sorted(gate_rows)
-    gate_stats={name:flin_dynamics_statistics(items,None,int(meta[0]),int(meta[1]))
-                for name,items in gate_rows.items()}
-    # Display sampling only; statistics above always include ALL stored events.
-    visible_ids=sorted(all_stats,key=lambda uid:(-all_stats[uid]['visits'],uid))[:max(50,int(render_limit))]
-    ids=set(visible_ids)
-    labels={}
-    for i in range(0,len(visible_ids),300):
-        part=visible_ids[i:i+300]
-        labels.update(con.execute('SELECT id,label FROM abc_units WHERE id IN ('+
-                ','.join('?'*len(part))+')',part).fetchall())
-    edges=[]
-    for i in range(0,len(visible_ids),180):
-        part=visible_ids[i:i+180]
-        for src,dst,w in con.execute("""SELECT e.src,e.dst,e.weight FROM abc_edges e
-            WHERE e.src IN ("""+','.join('?'*len(part))+') AND e.weight>0',part):
-            if dst in ids:edges.append((src,dst,float(w)))
-    edges.sort(key=lambda x:(-x[2],x[0],x[1]))
-    return dict(legacy=False,run_id=int(run_id),query=row[0],settings=json.loads(row[1]),
-        d_ref=int(meta[0]),k_ref=int(meta[1]),graph_units=int(meta[2]),graph_links=int(meta[3]),
-        events=rows,gates=gates,all_stats=all_stats,gate_stats=gate_stats,
-        gate_indices=dict(gate_indices),first_visit=first_visit,
-        terminals=terminals,pulse_origins=pulse_origins,
-        next_by_index=next_by_index,pulse_indices=dict(pulse_indices),
-        visit_examples=dict(visit_examples),labels=labels,
-        edges=edges[:int(edge_limit)],rendered=len(visible_ids),
-        sampled=len(all_stats)>len(visible_ids) or len(edges)>edge_limit,
-        full_visited=len(all_stats),max_time=max(float(r[6]) for r in rows))
-
-
-def flin_dynamics_structural_preview(con, seeds, d_ref=32, *, cap=1100):
-    """Bounded BFS over ACTUAL directed active links. No simulated pulse metrics."""
-    from collections import deque
-    queue=deque((uid,0) for uid in seeds)
-    distances={};edges=[]
-    while queue and len(distances)<cap:
-        uid,depth=queue.popleft()
-        if uid in distances or depth>d_ref:continue
-        distances[uid]=depth
-        if depth==d_ref:continue
-        for dst,w in con.execute("""SELECT e.dst,e.weight FROM abc_edges e
-            JOIN abc_units v ON v.id=e.dst AND v.status='active'
-            WHERE e.src=? AND e.weight>0 ORDER BY e.weight DESC,e.dst""",(uid,)):
-            edges.append((uid,dst,float(w)))
-            if dst not in distances:queue.append((dst,depth+1))
-    ids=list(distances);labels={}
-    for j in range(0,len(ids),200):
-        part=ids[j:j+200]
-        labels.update(con.execute('SELECT id,label FROM abc_units WHERE id IN ('+
-            ','.join('?'*len(part))+')',part).fetchall())
-    return {'distances':distances,'labels':labels,'edges':[e for e in edges
-            if e[0] in distances and e[1] in distances][:2200],
-            'limited':bool(queue),'d_ref':d_ref}
 
 
 def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
@@ -8232,9 +7899,7 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
     n_pulses=max(1,int(cfg['pulse_hz']*cfg['input_duration']))
     if n_pulses>max_pulses:
         raise ValueError(f' exceeds per-run imes simulation safety maximum  {max_pulses}  pulses Pulse , please adjust low Frequency or Time ')
-    # Instrumentation is read-only: no random draws, no extra eligibility rules.
-    k_ref,graph_units,graph_links=flin_dynamics_graph_reference(con)
-    events=defaultdict(list); path_examples=[];feedback=[];pulse_records=[];trace_records=[]
+    events=defaultdict(list); path_examples=[];feedback=[];pulse_records=[]
     edge_cache={}; labels={uid:label for uid,label,_ in seeds}
     next_releases=[]
     # All supply gates are active while their effective input exists. They
@@ -8243,7 +7908,7 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
         gate=j%len(seeds)
         next_releases.append((j/cfg['pulse_hz'],gate,seeds[gate][0]))
     last_time=0.
-    for pulse_id,(start,gate_index,entry) in enumerate(next_releases,1):
+    for start,gate_index,entry in next_releases:
         gate='gate:'+seeds[gate_index][2]
         current=entry;prev=None;visited=defaultdict(int);route=[]
         for depth in range(cfg['max_steps']):
@@ -8253,15 +7918,8 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
             # The input is directly triggerable even on first experience.
             # Among several learned exits, newly formed weaker routes have
             # smaller (not zero) probability. Exactly ONE exit conducts.
-            branch=[]
             exit_edge=flin_weighted_exit(con,current,prev,visited,
-                cfg['max_revisits'],rng,edge_cache,
-                observer=lambda count,entropy,pmax,pchosen:branch.append((count,entropy,pmax,pchosen)))
-            count,entropy,pmax,pchosen=branch[0]
-            reason='no_eligible_exit' if exit_edge is None else None
-            selected=exit_edge[0] if exit_edge else None
-            trace_records.append((pulse_id,gate,depth,current,prev,selected,tick,
-                                  reason,count,entropy,pmax,pchosen))
+                cfg['max_revisits'],rng,edge_cache)
             if exit_edge is None:
                 feedback.append((gate,current,'no_eligible_exit',tick));break
             dst,w,label=exit_edge
@@ -8269,13 +7927,6 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
             prev,current=current,dst
         else:
             feedback.append((gate,route[-1],'max_steps_guard',last_time))
-            # A computational guard is not a biological feedback initiation.
-            last=trace_records[-1]
-            # The last outgoing edge was sampled by the unchanged original router,
-            # but the safety guard prevented traversing it. Do not claim the pulse
-            # actually arrived at that unvisited destination.
-            trace_records[-1]=(last[0],last[1],last[2],last[3],last[4],None,
-                               last[6],'max_steps_guard',last[8],last[9],last[10],0.)
         if len(path_examples)<15:path_examples.append([labels.get(uid,uid) for uid in route])
     # Finish only after the last event has left the frequency window AND
     # the external input has stopped; a quiet period alone is not enough.
@@ -8316,18 +7967,16 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
                    for uid,label,name in seeds],
             'input_pulses':n_pulses,'end_time_s':round(duration,6),
             'distribution':distribution,'activated_count':len(events),
-            'visible_count':len(distribution),
-            'feedback_count':sum(row[2]=='no_eligible_exit' for row in feedback),
-            'safety_stop_count':sum(row[2]=='max_steps_guard' for row in feedback),
+            'visible_count':len(distribution),'feedback_count':len(feedback),
             'path_examples':path_examples,
             'time_samples_s':times,
             'response_curve_note':' complete  C  can by  abc_pulse_events  precisely reconstruct ; displayed response curve only Display representative Memory unit .',
             'response_series':[{'id':uid,'label':labels.get(uid,uid),
                                  'raw_hz':raw,'visible_hz':visible}
                                for uid,raw,visible in frames],
-            'run_id':None,'pulse_trace_version':1,'d_ref':cfg['max_steps'],'k_ref':k_ref,
+            'run_id':None,
             'notice':' Single-path routing uses weighted sampling by association strength ; Weight represents learned preference , NOT is Mathematics define principle credibility .'
-                     ' Long cycles are bounded by safety limits; feedback initiation retains the original input gate tag. No physical feedback-tree route is simulated.'}
+                     ' long cycles are allowed but with limit imes Revisits ; feedback forward only to Source gate .'}
     if save:
         with con:
             cur=con.execute('INSERT INTO abc_runs(query,settings_json,result_json) VALUES(?,?,?)',
@@ -8339,15 +7988,6 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
             # them, but provenance / per-gate feedback still does.
             con.executemany('INSERT INTO abc_feedback(run_id,gate,end_unit,reason,time_s) '
                             'VALUES(?,?,?,?,?)',[(run_id,*row) for row in feedback])
-            con.executemany('''INSERT INTO flin_pulse_trace
-                (run_id,pulse_id,gate,step_index,unit_id,previous_unit,
-                 selected_next_unit,simulation_time,terminal_reason,eligible_count,
-                 branch_entropy,max_exit_probability,chosen_probability)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                 [(run_id,*row) for row in trace_records])
-            con.execute('''INSERT INTO flin_dynamics_meta
-                (run_id,d_ref,k_ref,graph_units,graph_links) VALUES(?,?,?,?,?)''',
-                (run_id,cfg['max_steps'],k_ref,graph_units,graph_links))
             con.execute('UPDATE abc_runs SET result_json=? WHERE id=?',
                         (json.dumps(result,ensure_ascii=False),run_id))
     return result
@@ -8609,7 +8249,6 @@ class NetworkWindow:
                              sashrelief='flat',showhandle=False,borderwidth=0)
         panes.pack(fill='both',expand=True,padx=(8,8),pady=(0,8))
         graph=ttk.Frame(panes,style='Dark.TFrame')
-        self.flin_graph_host=graph
         side=ttk.Frame(panes,style='Side.TFrame',width=405)
         panes.add(graph,stretch='always',minsize=520)
         panes.add(side,stretch='never',minsize=360,width=405)
@@ -11297,11 +10936,7 @@ class NetworkWindow:
         try:
             for _ in range(300):
                 kind, msg = self.events.get_nowait()
-                if kind == 'xyz_ready':
-                    self._xyz_received(msg)
-                elif kind == 'xyz_error':
-                    self._xyz_error(msg)
-                elif kind == 'catalog_progress':
+                if kind == 'catalog_progress':
                     scanned,added=msg
                     self.catalog_status.set(f' Index scan  {scanned:,}  records , this run New  {added:,} papers')
                 elif kind == 'catalog_done':
@@ -11330,8 +10965,6 @@ class NetworkWindow:
                     self.abc_last_association_id=association_id
                     self.abc_activity.set('✓  time-varying Response already save ; reached Threshold Memory Unit:'+str(response['visible_count']))
                     self.abc_show_response(response,association_id)
-                    if hasattr(self,'_xyz_schedule'):
-                        self._xyz_schedule(force=True,run_id=response['run_id'])
                 elif kind == 'abc_worker_error':
                     self.abc_worker_active=False
                     self.abc_activity.set('✕ FLIN  work Failed :'+msg[:210])
@@ -12815,241 +12448,7 @@ class NetworkWindow:
 
 
 class ABCNetworkWindow(NetworkWindow):
-    """Original FLIN desktop GUI with direct XYZ mathematical graph positions."""
-
-    def _build_ui(self):
-        # Exactly the original desktop interface: no new buttons, playback,
-        # modes, run selectors or duplicate windows.
-        super()._build_ui()
-        self._xyz_data=None
-        self._xyz_coords={}
-        self._xyz_request=0
-        self._xyz_database=str(DB_PATH)
-        self._xyz_signature=None
-        self._xyz_last_request=0.
-        self._xyz_busy=False
-        self._xyz_pending_force=False
-        self._xyz_pending_run=None
-        self.root.after(350, lambda:self._xyz_schedule(force=True))
-
-    def _xyz_schedule(self, *, force=False, run_id=None):
-        """Refresh after graph changes, without blocking the Tk event loop."""
-        if not hasattr(self,'_xyz_busy'):return
-        if str(DB_PATH)!=self._xyz_database:
-            self._xyz_database=str(DB_PATH)
-            self._xyz_data=None;self._xyz_coords={}
-            self._xyz_signature=None
-            force=True
-        signature=(str(DB_PATH),tuple(self.plot_data),
-                   int(getattr(self,'_xyz_graph_total',0)),
-                   int(getattr(self,'_xyz_link_total',0)))
-        if not force and signature==self._xyz_signature:return
-        if self._xyz_busy:
-            self._xyz_pending_force=True
-            self._xyz_pending_run=run_id
-            return
-        # Updating the observer every GUI redraw would compete with SQLite
-        # writers. Throttle expensive full-graph snapshots during learning.
-        if not force and time.monotonic()-self._xyz_last_request<(120.0 if getattr(self,'_xyz_graph_total',0)>100000 else 25.0):return
-        self._xyz_signature=signature
-        self._xyz_last_request=time.monotonic()
-        self._xyz_busy=True
-        self._xyz_request+=1
-        token=self._xyz_request
-        db=str(DB_PATH)
-        display_ids=tuple(self.plot_data)
-        def work():
-            try:
-                with database(path=db) as con:
-                    # A single consistent WAL read snapshot: never mix epochs.
-                    con.execute('BEGIN')
-                    data=flin_dynamics_network_shape(con,display_ids,run_id=run_id)
-                    con.rollback()
-                self.events.put(('xyz_ready',(token,db,data)))
-            except Exception as ex:
-                self.events.put(('xyz_error',(token,db,str(ex))))
-        self._start_background_thread(target=work,name='FLIN_Network_Shape')
-
-    def _xyz_received(self,payload):
-        token,db,data=payload
-        if token!=self._xyz_request or db!=str(DB_PATH):return
-        self._xyz_busy=False
-        self._xyz_data=data
-        self._xyz_coords=data['positions']
-        self.graph_stats.set(
-            f"FLIN 3D: {len(self.plot_data):,}/{data['graph_units']:,} active memories displayed; "
-            f"XYZ computed for {data['graph_units']:,} · "
-            f"{data['visited_count']:,} measured / {data['estimated_count']:,} structural estimates. "
-            f"D_ref={data['d_ref']}, K_ref={data['k_ref']}.")
-        self.draw(preserve_view=False)
-        if self._xyz_pending_force:
-            pending=self._xyz_pending_run
-            self._xyz_pending_force=False
-            self._xyz_pending_run=None
-            self._xyz_schedule(force=True,run_id=pending)
-
-    def _xyz_error(self,payload):
-        token,db,error=payload
-        if token!=self._xyz_request or db!=str(DB_PATH):return
-        self._xyz_busy=False
-        self._xyz_signature=None
-        self.logline.set('Network-space analysis failed: '+error[:180])
-        if self._xyz_pending_force:
-            pending=self._xyz_pending_run
-            self._xyz_pending_force=False
-            self._xyz_pending_run=None
-            self._xyz_schedule(force=True,run_id=pending)
-
-    def _xyz_show_memory(self,uid):
-        data=self._xyz_data
-        v=data['stats'][uid]
-        with database() as con:
-            node=con.execute('SELECT label,definition FROM abc_units WHERE id=?',(uid,)).fetchone()
-            incoming=con.execute('SELECT src,weight FROM abc_edges WHERE dst=? ORDER BY weight DESC LIMIT 12',(uid,)).fetchall()
-            outgoing=con.execute('SELECT dst,weight FROM abc_edges WHERE src=? ORDER BY weight DESC LIMIT 12',(uid,)).fetchall()
-        lines=[node[0] if node else uid, 'ID: '+uid,
-               'Position source: '+('MEASURED pulse events' if v['source']=='observed'
-                    else 'STRUCTURAL ESTIMATE — no recorded pulse visits'),'',
-               f"X — Propagation Depth: {v['X']:.6f}",
-               (f"  Observed mean: {v['mean_depth']:.3f} steps" if v['visits']
-                else f"  Estimated directed distance: {v['structural_depth']} steps"),
-               f"Y — Branching Entropy: {v['Y']:.6f}",
-               (f"  Observed entropy: {v['mean_entropy']:.6f} nats" if v['visits']
-                else f"  Full-outdegree structural entropy: {v['structural_entropy']:.6f} nats"),
-               f"  Effective branches: {v['effective_branches']:.4f}",
-               f"  Structural outgoing links: {v['structural_outdegree']}",
-               f"Z — {'Feedback Initiation Rate' if v['visits'] else 'Structural dead-end indicator'}: {v['Z']:.6f}",
-               (f"  Recorded feedback origins: {v['feedback']} / {v['visits']} visits"
-                if v['visits'] else '  Actual feedback initiation: UNKNOWN (unvisited)'),
-               f"  Safety guard events: {v['guard']}" if v['visits'] else '  Safety guard events: UNKNOWN',
-               f"  Maximum exit probability: {v['max_exit_probability']}" if v['visits'] else
-                    '  Actual eligible-exit probabilities: UNKNOWN',
-               '',f"D_ref={data['d_ref']}; K_ref={data['k_ref']}",
-               'This spatial observation NEVER changes association routing.',
-               '', 'Incoming directed associations (current weights):']
-        lines += [f'  {u}: {w:.4g}' for u,w in incoming]
-        lines += ['', 'Outgoing directed associations (current weights):']
-        lines += [f'  {u}: {w:.4g}' for u,w in outgoing]
-        if node and node[1]:lines += ['','Source-grounded definition:',node[1][:1600]]
-        self.detail.configure(state='normal')
-        self.detail.delete('1.0','end')
-        self.detail.insert('1.0','\\n'.join(lines))
-        self.detail.configure(state='disabled')
-
-    def draw(self,preserve_view=False):
-        # All VERTICES in the original current viewport receive their mathematically
-        # determined XYZ. The background worker has computed positions over ALL
-        # active units, not only the originally sampled/reached units.
-        data=getattr(self,'_xyz_data',None)
-        if not data or not self.plot_data:return super().draw(preserve_view=preserve_view)
-        ax=self.ax
-        old_view=(ax.elev,ax.azim)
-        old_limits=(ax.get_xlim(),ax.get_ylim(),ax.get_zlim()) if preserve_view else None
-        ax.cla()
-        ax.set_facecolor(self.BG)
-        ax.view_init(elev=old_view[0],azim=old_view[1])
-        ax.set_xlabel('X — Propagation Depth',color=self.FG,labelpad=10)
-        ax.set_ylabel('Y — Branching Entropy',color=self.FG,labelpad=10)
-        ax.set_zlabel('Z — Feedback Initiation Rate / Dead-end Proxy',color=self.FG,labelpad=10)
-        ax.tick_params(colors=self.MUTED,labelsize=8)
-        ax.set_xlim(-.04,1.04);ax.set_ylim(-.04,1.04);ax.set_zlim(-.04,1.04)
-        ax.set_box_aspect((1,1,1))
-        positions=data['positions']
-        visible=[uid for uid in self.plot_data if uid in positions and uid in data['stats']]
-        if visible:
-            # Use existing viewport edge sample for DISPLAY ONLY. It cannot
-            # change network-wide XYZ calculations, and remains directed.
-            segments=[];widths=[];arrows=[]
-            for src,dst,_kind,weight,_count in self.edges:
-                if src not in self.plot_data or dst not in self.plot_data:continue
-                if src not in positions or dst not in positions:continue
-                a=np.asarray(positions[src]);b=np.asarray(positions[dst])
-                segments.append((a,b));widths.append(.3+min(1.7,math.log1p(max(0.,weight))*.43))
-                if len(arrows)<320:
-                    direction=b-a;length=np.linalg.norm(direction)
-                    if length>1e-5:
-                        u=direction/length
-                        tangent=np.cross(u,np.array([0.,0.,1.]))
-                        if np.linalg.norm(tangent)<1e-7:
-                            tangent=np.cross(u,np.array([0.,1.,0.]))
-                        tangent/=max(1e-12,np.linalg.norm(tangent))
-                        tip=a+.77*direction;size=min(.035,length*.12)
-                        arrows.extend([(tip,tip-size*u+.35*size*tangent),
-                                       (tip,tip-size*u-.35*size*tangent)])
-            if segments:ax.add_collection3d(Line3DCollection(segments,
-                colors='#7297b3',alpha=.32,linewidths=widths))
-            if arrows:ax.add_collection3d(Line3DCollection(arrows,
-                colors='#b5cfe2',alpha=.7,linewidths=.65))
-            ids=visible
-            pts=np.asarray([positions[uid] for uid in ids],dtype=float)
-            measured=[data['stats'][uid]['source']=='observed' for uid in ids]
-            # Orange: actual measured. Muted-blue: derived estimate. Neither
-            # introduces random coordinate jitter or artificial separation.
-            colors=['#f4ba73' if seen else '#68a9cd' for seen in measured]
-            ax.scatter(pts[:,0],pts[:,1],pts[:,2],s=24,c=colors,
-                       depthshade=False,edgecolors='none',alpha=.82)
-            if self.chosen in positions and self.chosen in self.plot_data:
-                x,y,z=positions[self.chosen]
-                ax.scatter([x],[y],[z],s=230,facecolors='none',
-                           edgecolors='white',linewidths=1.6)
-        run_tag=('run '+str(data['run_id']) if data['run_id'] is not None
-                 else 'no traced run')
-        ax.set_title('FLIN · Association Dynamics Space · '+run_tag+'\\n'
-            'Orange: observed XYZ  |  Blue: structural proxy  |  '
-            f'{len(visible):,}/{data["graph_units"]:,} memories rendered',
-            color=self.FG,fontsize=9)
-        if old_limits:
-            for values,fn in zip(old_limits,(ax.set_xlim,ax.set_ylim,ax.set_zlim)):
-                fn(*values)
-        self.canvas.draw_idle()
-
-    def _nearest(self,event):
-        if not getattr(self,'_xyz_data',None):return super()._nearest(event)
-        if event.inaxes!=self.ax or event.x is None or event.y is None:return None
-        positions=self._xyz_data['positions']
-        ids=[u for u in self.plot_data if u in positions and u in self._xyz_data['stats']]
-        if not ids:return None
-        pts=np.asarray([positions[u] for u in ids],dtype=float)
-        projected=proj3d.proj_transform(pts[:,0],pts[:,1],pts[:,2],self.ax.get_proj())
-        pixels=self.ax.transData.transform(np.column_stack(projected[:2]))
-        sq=np.sum((pixels-np.asarray((event.x,event.y)))**2,axis=1)
-        i=int(np.argmin(sq))
-        return ids[i] if sq[i]<18**2 else None
-
-    def on_click(self,event):
-        if not getattr(self,'_xyz_data',None):return super().on_click(event)
-        if event.button==1:
-            match=self._nearest(event)
-            if match:self.select(match)
-
-    def on_drag(self,event):
-        if not getattr(self,'_xyz_data',None):return super().on_drag(event)
-        # Observation coordinates are immutable: node dragging is disabled.
-
-    def on_release(self,event):
-        if not getattr(self,'_xyz_data',None):return super().on_release(event)
-
-    def on_scroll(self,event):
-        if not getattr(self,'_xyz_data',None):return super().on_scroll(event)
-        if event.inaxes!=self.ax or event.button not in ('up','down'):return
-        factor=.82 if event.button=='up' else 1.22
-        for get,set_ in ((self.ax.get_xlim,self.ax.set_xlim),
-                         (self.ax.get_ylim,self.ax.set_ylim),(self.ax.get_zlim,self.ax.set_zlim)):
-            lo,hi=get();mid=(lo+hi)/2;half=max(.015,(hi-lo)*.5*factor)
-            set_(mid-half,mid+half)
-        self.canvas.draw_idle()
-
-    def reset_camera(self):
-        if not getattr(self,'_xyz_data',None):return super().reset_camera()
-        self.ax.view_init(elev=24,azim=-65)
-        self.draw(preserve_view=False)
-
-    def abc_show_graph(self,result=None):
-        """After pulse simulation, refresh intrinsic network geometry in place."""
-        if result and result.get('run_id'):
-            self._xyz_schedule(force=True,run_id=int(result['run_id']))
-        else:
-            self._xyz_schedule(force=True)
+    """Single-interface FLIN mathematics workspace, no legacy-memory ingestion."""
 
     def __init__(self):
         # Existing users' original graph is never converted, deleted or reused.
@@ -13102,7 +12501,7 @@ class ABCNetworkWindow(NetworkWindow):
                 for start in range(0,len(ids),160):
                     part=ids[start:start+160]
                     sql=('SELECT id,label,definition,status,evidence_count FROM abc_units '
-                         "WHERE status='active' AND id IN ("+','.join('?' for _ in part)+')')
+                         'WHERE id IN ('+','.join('?' for _ in part)+')')
                     for uid,label,definition,status,evidence in con.execute(sql,part):
                         selected[uid]={'label':label,
                             'kind':'concept' if status=='active' else 'candidate',
@@ -13110,16 +12509,19 @@ class ABCNetworkWindow(NetworkWindow):
                             'citations':0,'support':evidence}
             else:
                 # Prioritize active associative memories, then candidates.
-                active_cap=limit
+                active_cap=int(limit*.79)
                 for uid,label,definition,status,evidence in con.execute(
                       'SELECT id,label,definition,status,evidence_count FROM abc_units '
                       "WHERE status='active' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
                       (active_cap,)):
                     selected[uid]=dict(label=label,kind='concept',description=definition,
                         url='',citations=0,support=evidence)
-                # Only triggerable (active) memories have FLIN association-space
-                # coordinates. Legacy candidates remain in SQLite and other UI
-                # reports; they are not graph members for pulse propagation.
+                for uid,label,definition,status,evidence in con.execute(
+                      'SELECT id,label,definition,status,evidence_count FROM abc_units '
+                      "WHERE status='candidate' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
+                      (limit-len(selected),)):
+                    selected[uid]=dict(label=label,kind='candidate',description=definition,
+                        url='',citations=0,support=evidence)
                 if len(selected)<limit:
                     for uid,label,definition,status,evidence in con.execute(
                           'SELECT id,label,definition,status,evidence_count FROM abc_units '
@@ -13143,13 +12545,6 @@ class ABCNetworkWindow(NetworkWindow):
             return selected,edges,totals,dict(selected)
 
     def reload_network(self):
-        # Observations are scoped to the SQLite network from which they came.
-        if hasattr(self,'_xyz_database') and self._xyz_database!=str(DB_PATH):
-            self._xyz_database=str(DB_PATH)
-            self._xyz_request+=1
-            self._xyz_busy=False
-            self._xyz_data=None;self._xyz_coords={}
-            self._xyz_signature=None
         try:
             previous=set(self.plot_data)
             nodes,edges,totals,all_nodes=self.get_network()
@@ -13176,21 +12571,14 @@ class ABCNetworkWindow(NetworkWindow):
                     for uid,x,y,z in con.execute(sql,part):
                         pos=np.asarray([x,y,z],dtype=float)
                         if np.all(np.isfinite(pos)):self.coords[uid]=pos
-            if not getattr(self,'_xyz_data',None):
-                self._layout(nodes,edges)
-            self._xyz_graph_total=status['active']
-            self._xyz_link_total=status['edges']
+            self._layout(nodes,edges)
             self.draw(preserve_view=bool(nodes) and previous==set(nodes))
             self.refresh_theory_states()
-            self._xyz_schedule()
         except Exception as exc:
             self.append_log('FLIN 3D rendering error: '+str(exc)[:250])
             self.logline.set('FLIN plot refresh failed: '+str(exc)[:150])
 
     def persist_positions(self,keys=None):
-        # XYZ is a derived observation, not a user-editable free layout.
-        # Preserve legacy abc_positions exactly after a shape is computed.
-        if getattr(self,'_xyz_data',None):return
         subset=keys or list(self.coords)
         with database() as con:
             with con:
@@ -13200,11 +12588,6 @@ class ABCNetworkWindow(NetworkWindow):
                     for k in subset if k in self.coords])
 
     def select(self,key,repaint=True):
-        if getattr(self,'_xyz_data',None) and key in self._xyz_data['stats']:
-            self.chosen=key
-            self._xyz_show_memory(key)
-            if repaint:self.draw(preserve_view=True)
-            return
         if key not in self.plot_data:return
         self.chosen=key;self.path=[]
         node=self.plot_data[key]
@@ -13353,7 +12736,7 @@ class ABCNetworkWindow(NetworkWindow):
             return
         with database() as con:
             with con:
-                for tab in ('flin_pulse_trace','flin_dynamics_meta','abc_feedback','abc_pulse_events','abc_runs','abc_cluster_links',
+                for tab in ('abc_feedback','abc_pulse_events','abc_runs','abc_cluster_links',
                             'abc_cluster_features','abc_replay_queue','abc_input_clusters',
                             'abc_learning_events','abc_evidence','abc_ssrs','abc_edges',
                             'abc_positions','abc_units','abc_source_topics','abc_sources',
@@ -13361,7 +12744,7 @@ class ABCNetworkWindow(NetworkWindow):
                             'flin_shortcut_members','flin_cost_decisions',
                             'abc_topics'):
                     con.execute('DELETE FROM '+tab)
-                for (aid,) in con.execute("SELECT id FROM association_runs WHERE model IN ('ABC pulse','FLIN pulse')"):
+                for (aid,) in con.execute("SELECT id FROM association_runs WHEREModelIN ('ABC pulse','FLIN pulse')"):
                     # Question histories for other legacy association runs are preserved.
                     for (sid,) in con.execute('SELECT id FROM question_sets WHERE run_id=?',(aid,)):
                         con.execute('DELETE FROM question_feedback WHERE candidate_id IN '
@@ -13500,7 +12883,6 @@ if __name__ == "__main__":
     parser.add_argument('--flin-discovery-info',action='store_true',help='Show persistent discovery frontier and progress in SQLite')
     parser.add_argument('--flin-source-report',action='store_true',help='Show source coverage, content depth, and the last stop reason')
     parser.add_argument('--flin-efficiency-report',action='store_true',help='Show association cost decisions and formed shortcut memories')
-    parser.add_argument('--flin-dynamics-report',type=int,metavar='RUN_ID',help='Show complete Association Dynamics metrics for a recorded run (headless)')
     parser.add_argument('--flin-retrofit',action='store_true',help='Evaluate existing SSRS input clusters for reusable shortcut memories')
     parser.add_argument('--flin-retrofit-limit',type=int,default=1000,help='Maximum existing clusters per retrofit run (default: 1000)')
     parser.add_argument('--diagnose',action='store_true',help='Run offline database and Ollama diagnostics without revealing API keys')
@@ -13585,19 +12967,6 @@ if __name__ == "__main__":
             outcome=abc_backfill(con,max(1,args.abc_batch))
             print(json.dumps(outcome,ensure_ascii=False,indent=2))
             print(json.dumps(abc_status(con),ensure_ascii=False,indent=2))
-        sys.exit(0)
-    if args.flin_dynamics_report is not None:
-        with database() as con:
-            data=flin_dynamics_load(con,args.flin_dynamics_report)
-            report=({'run_id':data['run_id'],'status':data['message']}
-                    if data.get('legacy') else
-                    {'run_id':data['run_id'],'d_ref':data['d_ref'],'k_ref':data['k_ref'],
-                     'graph_units':data['graph_units'],'graph_links':data['graph_links'],
-                     'visits':len(data['events']),'gates':data['gates'],
-                     'observed_unit_count':data['full_visited'],
-                     'per_memory':data['all_stats'],
-                     'warning':'Z measures initiations, not actual feedback-tree delivery.'})
-            print(json.dumps(report,ensure_ascii=False,indent=2))
         sys.exit(0)
     if args.flin_efficiency_report:
         with database() as con:
