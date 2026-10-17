@@ -1442,16 +1442,22 @@ def database(path=None) -> sqlite3.Connection:
                 if 'model' not in _cols:
                     con.execute(f"ALTER TABLE \"{_table}\" ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             con.commit()
-            # Do not expose draft questions until ALL ten questions finish model review.
+            # Do not expose draft questions until every requested question is reviewed.
             # Existing sets remain hidden until their review is explicitly resumed.
             set_columns={row[1] for row in con.execute('PRAGMA table_info(question_sets)')}
             if 'pipeline_status' not in set_columns:
                 con.execute("ALTER TABLE question_sets ADD COLUMN pipeline_status TEXT NOT NULL DEFAULT 'draft'")
                 con.commit()
-            # Review rounds are chosen AFTER all ten drafts exist. Persist
+            # Review rounds are chosen AFTER all requested drafts exist. Persist
             # that choice to make reopening and resuming unambiguous.
             if 'review_round_limit' not in set_columns:
                 con.execute('ALTER TABLE question_sets ADD COLUMN review_round_limit INTEGER')
+                con.commit()
+            # Legacy question sets contained ten questions. New sets persist an
+            # independent 1..20 target so interrupted jobs resume correctly.
+            if 'question_count' not in set_columns:
+                con.execute('ALTER TABLE question_sets '
+                            'ADD COLUMN question_count INTEGER NOT NULL DEFAULT 10')
                 con.commit()
             # v5.1: preserve matched seeds so diagnostics survive restarting the app.
             cols = {row[1] for row in con.execute('PRAGMA table_info(association_runs)')}
@@ -1502,6 +1508,7 @@ EXPORT_PROVENANCE_TABLES = (
     'abc_sources','abc_source_topics','abc_topics','abc_positions','flin_source_depth',
     'abc_input_clusters','abc_cluster_features','abc_cluster_links','abc_replay_queue',
     'flin_patterns','flin_pattern_evidence','flin_shortcut_members','flin_cost_decisions',
+    'flin_ingest_diagnostics',
 )
 
 
@@ -5155,12 +5162,20 @@ def flin_frontier_health(con, *, workers_pending=0):
     scan_through = int(scan_row[0]) if scan_row else 0
     later_units = int(con.execute("SELECT COUNT(*) FROM abc_units WHERE rowid>? AND status='active'",
                                   (scan_through,)).fetchone()[0])
-    unresolved = (sum(cats.get(k,0) for k in ('pending','error','running'))
+    # Completion must not ignore older, locally saved abstracts that still
+    # await extraction under the improved grounded concept recognizer.
+    cached_row=con.execute("SELECT value FROM abc_meta WHERE key='flin_source_input_backfill_v2_rowid'").fetchone()
+    cached_after=int(cached_row[0]) if cached_row else 0
+    cached_pending=int(con.execute('SELECT COUNT(*) FROM abc_sources WHERE rowid>?',
+                                    (cached_after,)).fetchone()[0])
+    unresolved = (cached_pending
+                  + sum(cats.get(k,0) for k in ('pending','error','running'))
                   + sum(topics.get(k,0) for k in ('pending','claimed','error'))
                   + incomplete + replay + later_units + max(0,int(workers_pending)))
     return {'complete': unresolved==0, 'unresolved':unresolved,
             'categories':cats, 'topics':topics, 'failed_topics':incomplete,
             'pending_replay':replay, 'unscanned_active_units':later_units,
+            'cached_sources_pending_backfill':cached_pending,
             'workers_pending':int(workers_pending)}
 
 
@@ -5624,6 +5639,7 @@ class Collector(threading.Thread):
         session=requests.Session()
         con=database()
         found=processed=linked=failures=0
+        accepted_papers=new_memories=new_input_clusters=missing_math_inputs=0
         phase='Wikipedia';state='running';failure_detail=''
         self._send_worker(worker,theory,phase)
         self.log(f'Starting direct FLIN learning from mathematical sources: {theory}')
@@ -5653,8 +5669,9 @@ class Collector(threading.Thread):
                 prepared=abc_extract_input_clusters(wid,theory,wiki_text,'',url,max_clusters=64)
                 with self.writer_lock:
                     abc_register_source(con,wid,'wikipedia',theory,url,wiki_text,topic=theory)
-                    abc_ingest_online_clusters(con,wid,theory,wiki_text,url=url,
+                    wiki_outcome=abc_ingest_online_clusters(con,wid,theory,wiki_text,url=url,
                                                prepared_clusters=prepared)
+                    flin_record_ingest_diagnostic(con,wid,theory,wiki_outcome)
                     con.execute('''INSERT INTO flin_source_depth(source_id,provider,read_level,text_chars)
                         VALUES(?,'Wikipedia','article_excerpt',?)
                         ON CONFLICT(source_id) DO UPDATE SET
@@ -5665,6 +5682,7 @@ class Collector(threading.Thread):
             seen=set()
             def accept_work(work, fallback_pdf_url=''):
                 nonlocal found,processed,linked,failures
+                nonlocal accepted_papers,new_memories,new_input_clusters,missing_math_inputs
                 if self.stopped.is_set():return
                 self.wait_if_paused()
                 if self.stopped.is_set():return
@@ -5676,6 +5694,7 @@ class Collector(threading.Thread):
                 ok,confidence,why=paper_math_quality(work,theory)
                 if not ok:
                     return
+                accepted_papers+=1
                 abstract=(work.get('_abstract_text') or
                     abstract_from_index(work.get('abstract_inverted_index')) or '')
                 title=str(work.get('display_name') or '').strip()
@@ -5702,6 +5721,7 @@ class Collector(threading.Thread):
                         work.get('publication_year'),work.get('cited_by_count') or 0,topic=theory)
                     outcome=abc_ingest_online_clusters(con,paper_id,title,abstract,fulltext,uri,
                                                        prepared_clusters=clusters)
+                    flin_record_ingest_diagnostic(con,source_id,theory,outcome)
                     read_level='pdf_excerpt' if fulltext or already_pdf else 'abstract' if abstract else 'title_only'
                     con.execute('''INSERT INTO flin_source_depth(source_id,provider,read_level,text_chars)
                         VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
@@ -5715,6 +5735,9 @@ class Collector(threading.Thread):
                          len(fulltext or abstract or '')))
                     con.commit()
                 linked+=outcome['edges']
+                new_memories+=outcome['promoted']
+                new_input_clusters+=outcome['clusters']
+                missing_math_inputs+=int(not outcome.get('extracted',0))
                 if processed<=3 or processed%10==0:
                     self._send_worker(worker,theory,'Learning from research papers',processed,
                                       self.per_theory,0,linked)
@@ -5797,7 +5820,11 @@ class Collector(threading.Thread):
             self.out.put(('theory_finished',
                          (worker,theory,state,processed,linked,finished)))
             self.out.put(('refresh',None))
-            self.log(f'FLIN topic {theory}: {state}; {processed} papers processed; {linked} directed-link updates.')
+            self.log(f'FLIN topic {theory}: {state}; {processed} papers considered; '
+                     f'{accepted_papers} passed mathematics quality checks; '
+                     f'{new_input_clusters} grounded input clusters; '
+                     f'{new_memories} new active memories; {linked} directed-link updates; '
+                     f'{missing_math_inputs} accepted papers without eligible mathematical input.')
             session.close();con.close()
 
 
@@ -6000,6 +6027,19 @@ class Collector(threading.Thread):
             else:
                 self.log('OpenAlex disabled; the network can be built without an OpenAlex API key or account.')
             session.close()
+            # Recover older accepted abstracts without rediscovering the topics.
+            # Bounded work prevents a massive old network from blocking startup.
+            try:
+                with contextlib.closing(database()) as restore_con:
+                    recovered=flin_backfill_cached_abstracts(restore_con,limit=100)
+                if recovered['scanned']:
+                    self.log('Cached source recovery: '
+                             f"{recovered['scanned']} inspected, "
+                             f"{recovered['active']} new active memories, "
+                             f"{recovered['edges']} association updates; "
+                             f"{recovered['failed']} source errors.")
+            except Exception as exc:
+                self.log('Warning: cached-source recovery postponed: '+str(exc)[:220])
             for i in range(1, self.workers+1):
                 thread = threading.Thread(target=self._worker_loop, args=(i,), daemon=True)
                 thread.start()
@@ -6117,6 +6157,20 @@ class Collector(threading.Thread):
                             pending=con.execute("SELECT COUNT(*) FROM flin_discovery_topics WHERE state='pending'").fetchone()[0]
                             if added:self.log(f'Expanded discovery with {added} source-grounded topics from new memory units.')
                         if pending or scanned:
+                            continue
+                        # Do not mark the source frontier complete while old
+                        # accepted abstracts are still waiting to be converted
+                        # into grounded, triggerable FLIN memories. Keep work
+                        # bounded to 100 sources per idle pass; newly formed
+                        # active units may themselves seed more discovery.
+                        with self.writer_lock, contextlib.closing(database()) as recovery_con:
+                            recovered=flin_backfill_cached_abstracts(recovery_con,limit=100)
+                        if recovered['scanned']:
+                            self.log('Cached learning catch-up: '
+                                     f"{recovered['scanned']} saved sources, "
+                                     f"{recovered['active']} new memories, "
+                                     f"{recovered['edges']} association updates.")
+                            self.out.put(('refresh',None))
                             continue
                         # No discovered work remains THIS PASS. Distinguish a
                         # genuinely drained source frontier from failed work.
@@ -6406,7 +6460,7 @@ def evidence_only_report(context, paths=()):
             lines.extend([f"{rel['ref']}  {rel['claim_label']}",
                           f"     original passage :{ev['quote'][:290]}",
                           f"     Literature :{ev['source_id']}"])
-    lines+=['',' Research question please click `✦  query and Generate ten questions ` or in association Results window click Generate button .',
+    lines+=['',' Research question please click `✦  query and generate your selected number of questions ` or in association Results window click Generate button .',
             ' require  3–4  items with clear confirm Research objects , premise and verifiable items label Candidate question .']
     for warning in context.get('warnings',[]):lines.append(' Note :'+warning)
     return '\n'.join(lines)
@@ -7129,17 +7183,30 @@ def compact_recall(context, paths, max_chars=36000):
     return facts
 
 
-def draft_ten_questions(model, context, paths, progress=None):
-    """Generate in 3/3/4 chunks, report and preserve results at each stage (caller)."""
+MIN_QUESTION_COUNT = 1
+MAX_QUESTION_COUNT = 20
+DEFAULT_QUESTION_COUNT = 10
+
+
+def draft_questions(model, context, paths, count=DEFAULT_QUESTION_COUNT, progress=None):
+    """Legacy batch helper; generate the caller-requested number (1..20)."""
+    count=int(count)
+    if not MIN_QUESTION_COUNT<=count<=MAX_QUESTION_COUNT:
+        raise ValueError('Question count must be between 1 and 20.')
     questions=[]
-    for target in (3,3,4):
-        batch=generate_question_batch(model,context,paths,target,
+    for start in range(0,count,4):
+        batch=generate_question_batch(model,context,paths,min(4,count-start),
                                       [q['title'] for q in questions])
         questions.extend(batch)
         if progress:progress(questions)
-    if len(questions)<10:
-        raise RuntimeError(f'Modelonly Generate  {len(questions)}  questions valid question , Completed person still retain ; please use ` Complete missing missing questions items `.')
-    return questions[:10]
+    if len(questions)<count:
+        raise RuntimeError(f'Only {len(questions)}/{count} valid questions were generated.')
+    return questions[:count]
+
+
+def draft_ten_questions(model, context, paths, progress=None):
+    """Retained for API compatibility, without affecting configurable sets."""
+    return draft_questions(model, context, paths, 10, progress)
 
 
 JUDGE_SCHEMA = {
@@ -7515,8 +7582,21 @@ def save_feedback(con,candidate_id,role,score,comment,rubric=None,model=''):
     return cur.lastrowid
 
 
+def get_question_count(set_id):
+    """Read the persisted per-set target; old question sets default to ten."""
+    with database() as con:
+        row = con.execute('SELECT question_count FROM question_sets WHERE id=?',
+                          (set_id,)).fetchone()
+    if row is None:
+        raise ValueError(f'Question set #{set_id} not found')
+    value = int(row[0])
+    if not MIN_QUESTION_COUNT <= value <= MAX_QUESTION_COUNT:
+        raise ValueError(f'Invalid saved question count: {value}')
+    return value
+
+
 def question_pipeline_status(set_id):
-    """Durable display gate. Never infer completion merely from ten drafts."""
+    """Durable display gate. Never infer completion merely from draft count."""
     with database() as con:
         row=con.execute('SELECT pipeline_status FROM question_sets WHERE id=?',(set_id,)).fetchone()
     return row[0] if row else 'draft'
@@ -7572,9 +7652,9 @@ def get_question_rows(set_id):
 # unreviewed question sets). Files live next to questioning.py in Questions/.
 # ---------------------------------------------------------------------------
 def export_final_question_set(set_id, base_dir=None):
-    """Return paths of an atomic JSON/TXT export of ten finalized questions.
+    """Return paths of an atomic JSON/TXT export of the finalized set.
 
-    This function does not use Tk. It verifies the READY flag, exactly ten
+    This function does not use Tk. It verifies the READY flag, exactly the requested
     currently selected question versions, and one machine evaluation per slot.
     Both exports are generated from one consistent SQLite read snapshot.
     """
@@ -7582,18 +7662,22 @@ def export_final_question_set(set_id, base_dir=None):
     with contextlib.closing(database()) as con:
         con.execute('BEGIN')
         row=con.execute("""SELECT id,run_id,topic,created,pipeline_status,
-                           review_round_limit FROM question_sets WHERE id=?""",
+                           review_round_limit,question_count FROM question_sets WHERE id=?""",
                         (set_id,)).fetchone()
         if not row:
             raise ValueError(f' cannot find question set  #{set_id}.')
-        _,run_id,topic,created,status,round_limit=row
+        _,run_id,topic,created,status,round_limit,question_count=row
+        question_count=int(question_count)
+        if not MIN_QUESTION_COUNT<=question_count<=MAX_QUESTION_COUNT:
+            raise ValueError('Invalid saved question count')
         if status!='ready':
-            raise ValueError(' can onlyExport Completeten questionsReviewand Revision final question ; Current question set Not yet Completed .')
+            raise ValueError('Only fully reviewed question sets can be exported.')
         records=con.execute("""SELECT id,slot,version,content_json,model,created
             FROM question_candidates WHERE set_id=? AND current=1
             ORDER BY slot""",(set_id,)).fetchall()
-        if len(records)!=10 or [r[1] for r in records]!=list(range(1,11)):
-            raise ValueError(' cannot find complete ten questions final version ; Stop Export to avoid save NOT complete draft .')
+        if (len(records)!=question_count or
+                [r[1] for r in records]!=list(range(1,question_count+1))):
+            raise ValueError(f'Incomplete final question set: expected {question_count} consecutive slots.')
         questions=[]
         for cid,slot,version,content_json,model,version_created in records:
             feedback=con.execute("""SELECT score,comment,rubric_json,model,created
@@ -7627,6 +7711,7 @@ def export_final_question_set(set_id, base_dir=None):
         'format':'Brain_Project.final_questions','schema_version':1,'domain':active_domain(),'domain_label':domain_name(),
         'set_id':set_id,'run_id':run_id,'topic':topic,
         'question_set_created_at':created,'review_round_limit':round_limit,
+        'requested_question_count':question_count,
         'exported_at_utc':exported_at,
         'note':'Model ratings are heuristic assessments, not independent scientific verification.',
         'question_count':len(questions),'questions':questions,
@@ -7780,6 +7865,18 @@ def abc_schema(con):
           cluster_id TEXT PRIMARY KEY
         );
         CREATE TABLE IF NOT EXISTS abc_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS flin_ingest_diagnostics(
+          source_id TEXT NOT NULL, topic TEXT NOT NULL DEFAULT '',
+          extracted_clusters INTEGER NOT NULL DEFAULT 0,
+          new_clusters INTEGER NOT NULL DEFAULT 0,
+          new_active_units INTEGER NOT NULL DEFAULT 0,
+          edge_updates INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT '',
+          updated TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(source_id,topic)
+        );
+        CREATE INDEX IF NOT EXISTS idx_flin_ingest_status
+          ON flin_ingest_diagnostics(status,topic);
         CREATE TABLE IF NOT EXISTS abc_sources(
           id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
           url TEXT NOT NULL DEFAULT '', abstract TEXT NOT NULL DEFAULT '',
@@ -7949,47 +8046,131 @@ def abc_explanatory_evidence(text):
                           text,flags=re.IGNORECASE))
 
 
-def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *, max_clusters=32):
-    """Produce *source-grounded* mathematical input clusters from online documents.
+def flin_math_terms_from_source(sentence, extra=()):
+    """Recognize *literal* source terms, including previously unseen math phrases.
 
-    A cluster is a complete statement from ONE paper, with the mathematical
-    features that occur in it. It is not a bag of topic-wide keywords, nor a
-    semantic embedding. Unknown definitions remain candidates. Sentence order
-    is an observable input feature, NOT proof of a mathematical implication.
+    The structural-noun and mathematical-quality gates remain mandatory. Every
+    returned phrase must occur in the quoted source span; this does NOT infer
+    semantic identity or mathematical implication.
     """
-    raw=' '.join(str(x or '') for x in (title, abstract, (fulltext or '')[:48000]))
+    found=list(math_terms_in_sentence(sentence,extra))
+    words=list(re.finditer(r"\b[A-Za-z][A-Za-z0-9-]*\b",sentence))
+    # An unknown mathematical construct should not require prior membership in
+    # the fixed MATH_ANCHORS lexicon. Inspect only short noun-headed phrases.
+    for end,match in enumerate(words):
+        if _lemma(match.group().casefold()) not in MATH_CONCEPT_HEADS:
+            continue
+        for size in (5,4,3,2):
+            begin=end-size+1
+            if begin<0:continue
+            first=words[begin]; phrase=sentence[first.start():match.end()]
+            label=canonical_phrase(phrase)
+            if (len(label)>100 or not _pure_math_concept_quality(label)[0] or
+                    score_math_unit_purity(label,'concept')[0]<75):
+                continue
+            found.append((first.start(),match.end(),label))
+            break  # prefer the longest admissible, literally occurring name
+    # Within one overlapping span, the longest qualified label is preferred.
+    # Non-overlapping distinct concepts retain their source-text order.
+    chosen=[]
+    for a,b,label in sorted(found,key=lambda r:(-(r[1]-r[0]),r[0],r[2])):
+        if any(a<y and x<b for x,y,_ in chosen):continue
+        if abc_key(label) not in abc_key(sentence[a:b]):continue
+        chosen.append((a,b,label))
+    return sorted(chosen,key=lambda r:(r[0],r[1]))
+
+
+def _flin_source_sentence_spans(text, minimum=28, maximum=500, cap=260):
+    """Preserve offsets, so adjacent-statement clusters quote actual source text."""
+    text=str(text or '')
+    boundaries=[0]+[m.end() for m in SENTENCE_RE.finditer(text)]+[len(text)]
+    spans=[]
+    for a,b in zip(boundaries,boundaries[1:]):
+        while a<b and text[a].isspace():a+=1
+        while b>a and text[b-1].isspace():b-=1
+        if minimum<=b-a<=maximum:
+            spans.append((a,b,text[a:b]))
+            if len(spans)>=cap:break
+    return spans
+
+
+def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *, max_clusters=32):
+    """Observe source-backed mathematical features in ordered text inputs.
+
+    Includes (a) validated mathematical names in real, short paper titles;
+    (b) noun-headed mathematical constructs absent from a fixed dictionary;
+    (c) adjacent short abstract sentences as one *contiguous observed* context.
+    Adjacent input order licenses association, NOT a claimed mathematical proof.
+    No language model or semantic embedding decides whether to create a unit.
+    """
+    raw=' '.join(str(x or '') for x in (title,abstract,(fulltext or '')[:48000]))
     if not raw.strip():return []
-    # NEVER fabricate a quote by concatenating a paper title and its abstract.
-    # Each source section is segmented independently and original sentences
-    # remain intact for reproducible mathematical provenance checks.
-    parts=(split_sentences(title)+split_sentences(abstract)+
-           split_sentences((fulltext or '')[:48000]))
-    seen=set();clusters=[]
-    # Prior extractor accepts heads not present in a fixed anchor dictionary;
-    # it still requires a mathematical structural shape and source occurrence.
-    extra=[name for name,_ in keyphrases(raw,title,limit=24)]
-    for index,sentence in enumerate(parts):
-        quote=' '.join(sentence.split()).strip()
-        if len(quote)<45 or len(quote)>500:continue
-        fingerprint=hashlib.sha256(abc_key(quote).encode('utf-8')).hexdigest()[:24]
-        if fingerprint in seen:continue
-        seen.add(fingerprint)
-        terms=math_terms_in_sentence(quote,extra)
+    cap=max(1,int(max_clusters))
+    extra=[name for name,_ in keyphrases(raw,str(title or ''),limit=24)]
+    sections=[('title',str(title or ''),28,500,1),
+              ('abstract',str(abstract or ''),28,500,160),
+              ('fulltext',str(fulltext or '')[:48000],28,500,260)]
+    clusters=[];seen=set();global_index=0
+    def add_cluster(quote,base_index,*,is_title=False):
+        if not 28<=len(quote)<=1100 or len(clusters)>=cap:return False
+        # A title is enough to observe a *named mathematical concept*, never
+        # enough to assert an explanation or an association between subjects.
+        terms=flin_math_terms_from_source(quote,extra)
         selected=[];seen_units=set()
         for start,end,label in terms:
-            if label in seen_units or score_math_unit_purity(label,'concept')[0]<75:continue
+            if label in seen_units:continue
             seen_units.add(label)
             selected.append({'label':label,'explanation':quote,'url':url,
-                             'position':float(index)+start/max(1,len(quote))})
-        # One concept is useful as a potential definition, but a bare mention
-        # is not evidence of a learned relationship.
-        explanatory=abc_explanatory_evidence(quote)
-        if len(selected)<2 and not (len(selected)==1 and explanatory):continue
-        if not selected:continue
+                             'position':float(base_index)+start/max(1,len(quote))})
+        if not selected:return False
+        if not is_title and len(selected)<2 and not abc_explanatory_evidence(quote):
+            return False
+        if is_title and len(selected)>1:
+            # A title may literally name several independent mathematical
+            # objects. Admit each as a separate observed memory without
+            # fabricating a directional relationship between title terms.
+            for unit in selected:
+                if len(clusters)>=cap:break
+                fingerprint=hashlib.sha256(
+                    (abc_key(quote)+'|title:'+abc_key(unit['label'])).encode('utf-8')).hexdigest()[:24]
+                if fingerprint in seen:continue
+                seen.add(fingerprint)
+                cluster_id='online:'+hashlib.sha256(
+                    (str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
+                clusters.append({'id':cluster_id,'paper_id':str(paper_id),
+                                 'quote':quote,'url':str(url or ''),'features':[unit]})
+            return True
+        fingerprint=hashlib.sha256(abc_key(quote).encode('utf-8')).hexdigest()[:24]
+        if fingerprint in seen:return False
+        seen.add(fingerprint)
         cluster_id='online:'+hashlib.sha256((str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
         clusters.append({'id':cluster_id,'paper_id':str(paper_id),'quote':quote,
                          'url':str(url or ''),'features':selected})
-        if len(clusters)>=max(1,int(max_clusters)):break
+        return True
+
+    for kind,source,minimum,maximum,maxparts in sections:
+        if not source:continue
+        sentences=_flin_source_sentence_spans(source,minimum,maximum,maxparts)
+        for a,b,quote in sentences:
+            if len(clusters)>=cap:return clusters
+            add_cluster(quote,global_index,is_title=(kind=='title'))
+            global_index+=1
+        if kind=='abstract' and len(clusters)<cap:
+            # In a real abstract the next sentence is an adjacent input in
+            # the same source. Join only actual contiguous spans; never join
+            # a title to another document or arbitrary distant paragraphs.
+            for (a,b,left),(c,d,right) in zip(sentences,sentences[1:]):
+                if c-b>8 or d-a>1050:continue
+                first=flin_math_terms_from_source(left,extra)
+                second=flin_math_terms_from_source(right,extra)
+                if (len(first)!=1 or len(second)!=1 or first[0][2]==second[0][2]):
+                    continue
+                quote=source[a:d]
+                # Preserve occurrence order (source offsets), even if a
+                # neighboring clause has no explanatory verb by itself.
+                add_cluster(quote,global_index)
+                global_index+=1
+                if len(clusters)>=cap:break
     return clusters
 
 
@@ -8262,6 +8443,78 @@ def abc_register_source(con, source_id, kind, title, url='', abstract='', year=N
                         (str(source_id),str(topic)))
 
 
+def flin_record_ingest_diagnostic(con, source_id, topic, outcome):
+    """Audit why a verified paper did or did not grow the association graph.
+
+    For multiple passes, retain the maximum observed counts so a later replay
+    cannot overwrite a successful initial learning event with zero duplicates.
+    """
+    extracted=int(outcome.get('extracted',outcome.get('clusters',0)))
+    fresh=int(outcome.get('clusters',0))
+    active=int(outcome.get('promoted',0))
+    edges=int(outcome.get('edges',0))
+    state=('no_grounded_math_input' if not extracted else
+           'already_observed' if not fresh else
+           'new_triggerable_memories' if active else
+           'associations_updated' if edges else 'existing_memory_reobserved')
+    con.execute("""INSERT INTO flin_ingest_diagnostics
+        (source_id,topic,extracted_clusters,new_clusters,new_active_units,
+         edge_updates,status) VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(source_id,topic) DO UPDATE SET
+        extracted_clusters=MAX(extracted_clusters,excluded.extracted_clusters),
+        new_clusters=MAX(new_clusters,excluded.new_clusters),
+        new_active_units=MAX(new_active_units,excluded.new_active_units),
+        edge_updates=MAX(edge_updates,excluded.edge_updates),
+        status=CASE WHEN excluded.new_active_units>0 THEN excluded.status
+          WHEN flin_ingest_diagnostics.new_active_units>0 THEN flin_ingest_diagnostics.status
+          WHEN excluded.new_clusters>0 THEN excluded.status
+          ELSE flin_ingest_diagnostics.status END,
+        updated=CURRENT_TIMESTAMP""",
+        (str(source_id),str(topic),extracted,fresh,active,edges,state))
+    return state
+
+
+def flin_backfill_cached_abstracts(con, limit=12):
+    """Recover grounded FLIN inputs from previously saved source abstracts.
+
+    This is a one-pass, restartable sweep over *already stored* sources. It
+    does not fetch literature, alter the legacy graph, or duplicate input
+    events and link reinforcement already stored in SQLite.
+    """
+    if not abc_enabled(con):
+        return {'scanned':0,'clusters':0,'active':0,'edges':0,'failed':0}
+    meta='flin_source_input_backfill_v2_rowid'
+    current=con.execute('SELECT value FROM abc_meta WHERE key=?',(meta,)).fetchone()
+    after=int(current[0]) if current else 0
+    rows=con.execute("""SELECT rowid,id,kind,title,abstract,url FROM abc_sources
+        WHERE rowid>? ORDER BY rowid LIMIT ?""",(after,max(1,min(200,int(limit))))).fetchall()
+    totals={'scanned':0,'clusters':0,'active':0,'edges':0,'failed':0}
+    for rowid,source_id,kind,title,abstract,url in rows:
+        try:
+            if kind in ('paper','wikipedia') and (title or abstract):
+                paper_id=(source_id[6:] if source_id.startswith('paper:') else source_id)
+                outcome=abc_ingest_online_clusters(con,paper_id,title or '',abstract or '',
+                                                    url=url or '')
+                flin_record_ingest_diagnostic(con,source_id,'__cached_backfill__',outcome)
+                totals['clusters']+=outcome['clusters']
+                totals['active']+=outcome['promoted']
+                totals['edges']+=outcome['edges']
+        except (ValueError,TypeError,sqlite3.Error) as exc:
+            totals['failed']+=1
+            # A malformed legacy record must not block the entire sweep.
+            con.execute("""INSERT INTO flin_ingest_diagnostics
+                (source_id,topic,status) VALUES(?,'__cached_backfill__',?)
+                ON CONFLICT(source_id,topic) DO UPDATE SET
+                status=excluded.status,updated=CURRENT_TIMESTAMP""",
+                (str(source_id),'error:'+str(exc)[:110]))
+        finally:
+            con.execute('INSERT OR REPLACE INTO abc_meta(key,value) VALUES(?,?)',
+                        (meta,str(rowid)))
+            con.commit()
+            totals['scanned']+=1
+    return totals
+
+
 def abc_graph_totals(con):
     status=abc_status(con)
     return (status['topics'],status['learned_sources'],status['active'],status['edges'])
@@ -8270,7 +8523,7 @@ def abc_graph_totals(con):
 def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', url='',
                                *, prepared_clusters=None):
     """Web/arXiv/Crossref -> grounded clusters -> SSRS -> FLIN memory graph."""
-    if not abc_enabled(con):return {'clusters':0,'promoted':0,'edges':0}
+    if not abc_enabled(con):return {'clusters':0,'promoted':0,'edges':0,'extracted':0}
     clusters=(prepared_clusters if prepared_clusters is not None else
               abc_extract_input_clusters(paper_id,title,abstract,fulltext,url))
     done=promoted=edges=0
@@ -8284,7 +8537,7 @@ def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', u
             done+=1;promoted+=res['promoted'];edges+=res['edges']
     # One bounded reconcile per paper, not one SQLite graph pass per sentence.
     edges+=abc_reconcile_pending(con,limit=400)['edges']
-    return {'clusters':done,'promoted':promoted,'edges':edges}
+    return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters)}
 
 
 def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22,
@@ -9939,17 +10192,26 @@ class NetworkWindow:
             messagebox.showerror('Question Generation Unavailable','No saved association run or local memory network is available.');return
         context=json.loads(ctxrow[0]);paths=json.loads(row[1] or '[]');query=row[0]
         if set_id is None:
+            requested=simpledialog.askinteger(
+                'Question Count', 'How many research questions should FLIN generate? (1–20)',
+                initialvalue=DEFAULT_QUESTION_COUNT,
+                minvalue=MIN_QUESTION_COUNT,maxvalue=MAX_QUESTION_COUNT,
+                parent=self.root)
+            if requested is None:
+                return  # Cancel: do not create an empty set or start Ollama.
             with database() as con:
                 with con:
-                    set_id=con.execute('INSERT INTO question_sets(run_id,topic) VALUES(?,?)',
-                                       (run_id,query)).lastrowid
+                    set_id=con.execute(
+                        'INSERT INTO question_sets(run_id,topic,question_count) VALUES(?,?,?)',
+                        (run_id,query,requested)).lastrowid
+        target_count=get_question_count(set_id)
         self.show_question_window(set_id)
         window=self.question_windows[set_id]
         if set_id in self.generating_sets or set_id in self.iteration_jobs:
             window['win'].lift();return
         current_count,_=question_pipeline_counts(set_id)
-        if question_pipeline_status(set_id)=='ready' and current_count==10:
-            window['status'].set('✓  ten questions Completed score and iterate , Processing Display final version .')
+        if question_pipeline_status(set_id)=='ready' and current_count==target_count:
+            window['status'].set(f'✓ {target_count} reviewed questions are ready.')
             self.update_question_window(set_id)
             return
         set_question_pipeline_status(set_id,'draft')
@@ -9964,7 +10226,7 @@ class NetworkWindow:
         self.generating_sets.add(set_id)
         self.question_model_activity(set_id,True,'Model: Processing connection and Generate draft ')
         window['generate_btn'].configure(state='disabled')
-        window['status'].set('Stage 1/2:Generation in Progress 10  questions draft and automatic save ; Generate after completion will please you Settings review rounds .')
+        window['status'].set(f'Stage 1/2: Generating {target_count} questions serially; each draft is saved immediately.')
         def worker():
             try:
                 candidates,installed=available_ollama_models(model)
@@ -9972,11 +10234,12 @@ class NetworkWindow:
                     rows=con.execute('SELECT slot,content_json FROM question_candidates '
                         'WHERE set_id=? AND current=1 ORDER BY slot',(set_id,)).fetchall()
                 existing={int(slot):json.loads(raw) for slot,raw in rows}
-                if len(existing)>=10:
-                    self.events.put(('v8_generation_ready',(set_id,len(existing))))
+                if (len(existing)==target_count and
+                        set(existing)==set(range(1,target_count+1))):
+                    self.events.put(('v8_generation_ready',(set_id,target_count)))
                     return
                 saved_titles={str(v.get('title','')).strip().casefold() for v in existing.values()}
-                missing=[slot for slot in range(1,11) if slot not in existing]
+                missing=[slot for slot in range(1,target_count+1) if slot not in existing]
                 self.events.put(('v8_generation_status',(set_id,
                     'Sequential draft generation: one question / one Ollama call at a time.')))
                 errors = {}
@@ -9991,7 +10254,7 @@ class NetworkWindow:
                                 existing_titles=tuple(excluded), slot_number=slot,
                                 progress=lambda detail: self.events.put(
                                     ('v8_generation_status',
-                                     (set_id, f'Question {slot}/10 | generating: {str(detail)[:190]}'))),
+                                     (set_id, f'Question {slot}/{target_count} | generating: {str(detail)[:190]}'))),
                                 cancel_event=stopper)
                             if not out:
                                 raise ValueError('Missing valid question')
@@ -10008,7 +10271,7 @@ class NetworkWindow:
                     if stopper.is_set():
                         break
                     self.events.put(('v8_generation_status',
-                        (set_id, f'Question {slot}/10 | generating and saving serially.')))
+                        (set_id, f'Question {slot}/{target_count} | generating and saving serially.')))
                     try:
                         question, used = draft_slot(slot, tuple(saved_titles))
                         title = str(question.get('title', '')).strip().casefold()
@@ -10031,13 +10294,13 @@ class NetworkWindow:
                         errors[slot] = str(exc)[:300]
                 if stopper.is_set():
                     self.events.put(('v8_generation_cancelled',(set_id,len(existing))))
-                elif errors or len(existing)!=10:
+                elif errors or len(existing)!=target_count:
                     self.events.put(('v8_generation_error',(set_id,
-                        f'Saved {len(existing)}/10 drafts; failed slots: '+
+                        f'Saved {len(existing)}/{target_count} drafts; failed slots: '+
                         '; '.join(f'{slot}: {err}' for slot,err in sorted(errors.items()))[:900]+
                         '. Retry to generate only the missing slots.')))
                 else:
-                    self.events.put(('v8_generation_ready',(set_id,10)))
+                    self.events.put(('v8_generation_ready',(set_id,target_count)))
             except Exception as exc:
                 self.events.put(('v8_generation_error',(set_id,str(exc))))
         self._start_background_thread(target=worker, name=f'BrainQwenDraft-{set_id}')
@@ -10087,6 +10350,7 @@ class NetworkWindow:
             entry=con.execute('SELECT topic,run_id FROM question_sets WHERE id=?',(set_id,)).fetchone()
         if not entry:return
         topic,run_id=entry
+        target_count=get_question_count(set_id)
         win=tk.Toplevel(self.root);win.title(f'Mathematical Research Workspace — Question Set #{set_id}')
         win.geometry(f'{min(1280,max(900,win.winfo_screenwidth()-40))}x{min(810,max(620,win.winfo_screenheight()-80))}');win.minsize(820,570);win.configure(bg=self.BG)
         header=ttk.Frame(win,style='Dark.TFrame',padding=(16,12));header.pack(fill='x')
@@ -10102,12 +10366,12 @@ class NetworkWindow:
             ttk.Label(cell,text=name,style='Dark.TLabel').pack(anchor='w')
             ttk.Entry(cell,textvariable=var,style='Dark.TEntry',state='readonly').pack(fill='x',pady=(3,0))
         # Round count is NOT entered in this workbench anymore. It is asked
-        # only after all ten drafts have been durably saved.
+        # only after all requested drafts have been durably saved.
         config2=ttk.Frame(win,style='Dark.TFrame',padding=(12,5));config2.pack(fill='x')
-        ttk.Label(config2,text='Generate ten drafts, configure the review rounds, then start review. Final questions are displayed only after review completes.',
+        ttk.Label(config2,text='Generate the selected number of drafts, configure the review rounds, then start review. Final questions are displayed only after review completes.',
                   style='Dark.TLabel').pack(side='left')
         row=ttk.Frame(win,style='Dark.TFrame',padding=(12,3));row.pack(fill='x')
-        generate_btn=ttk.Button(row,text='Generate / Complete Ten Questions',style='Accent.TButton',
+        generate_btn=ttk.Button(row,text='Generate / Complete Questions',style='Accent.TButton',
                                 command=lambda:self.retry_question_generation(set_id))
         generate_btn.pack(side='left',padx=(0,6))
         ttk.Button(row,text='Stop Generation and Save',style='Dark.TButton',
@@ -10124,7 +10388,7 @@ class NetworkWindow:
         # individual Ollama calls use an indeterminate activity indicator.
         progress_panel=ttk.Frame(win,style='Dark.TFrame',padding=(13,5))
         progress_panel.pack(fill='x')
-        draft_caption=tk.StringVar(value='Generation: 0/10 questions')
+        draft_caption=tk.StringVar(value=f'Generation: 0/{target_count} questions')
         review_caption=tk.StringVar(value='Review: Not Started')
         stage_caption=tk.StringVar(value='Current stage: Awaiting question generation')
         request_caption=tk.StringVar(value='Model: Idle')
@@ -10160,7 +10424,7 @@ class NetworkWindow:
         details=tk.Text(right,wrap='word',bg=self.FIELD,fg=self.FG,
                         relief='flat',padx=12,pady=10,font=('Noto Sans CJK TC',11))
         details.pack(fill='both',expand=True,pady=(5,9))
-        export_btn=ttk.Button(actions,text='⇧  store final ten questions (JSON + TXT)',style='Accent.TButton',
+        export_btn=ttk.Button(actions,text='⇧  Export reviewed questions (JSON + TXT)',style='Accent.TButton',
                               command=lambda:self.save_final_questions(set_id))
         export_btn.pack(fill='x',pady=(5,0))
         ttk.Button(actions,text=' View Completed questions items All RevisionVersionand history imesModelEvaluation ',style='Dark.TButton',
@@ -10173,13 +10437,13 @@ class NetworkWindow:
                'review_caption':review_caption,'review_value':review_value,
                'stage_caption':stage_caption,'stage_value':stage_value,
                'request_caption':request_caption,'model_spinner':model_spinner,
-               'spinner_running':False,'review_cycle':0}
+               'spinner_running':False,'review_cycle':0,'question_count':target_count}
         self.question_windows[set_id]=state
         table.bind('<<TreeviewSelect>>',lambda e:self.show_question_detail(set_id))
         win.protocol('WM_DELETE_WINDOW',lambda:self.close_question_window(set_id))
         self.update_question_window(set_id)
         count,_=question_pipeline_counts(set_id)
-        if (count==10 and question_pipeline_status(set_id)!='ready'
+        if (count==target_count and question_pipeline_status(set_id)!='ready'
                 and set_id not in self.generating_sets and set_id not in self.iteration_jobs):
             # Opening an unfinished, fully drafted question set after restarting
             # the app offers the same review-confirmation flow.
@@ -10214,13 +10478,14 @@ class NetworkWindow:
         """
         state=self.question_windows.get(set_id)
         if not state or not state['win'].winfo_exists():return
+        target_count=state['question_count']
         cycle=max(1,int(cycle));maxround=max(1,int(maxround))
         total=max(0,int(total));done=min(total,max(0,int(done)))
         names={'judge':' research review ','critic':' Critique recommendation ','revise':' question revision ',
                'final':' final final review ','select':' most bestVersionselect '}
         name=names.get(phase,phase)
         label=f' Current work :{name} {done}/{total}'
-        if slot:label+=f'| questions  {slot}/10'
+        if slot:label+=f'| questions  {slot}/{target_count}'
         state['stage_caption'].set(label)
         state['stage_value'].set(round(100*done/total,1) if total else 100)
         # A cycle is planned as judge / critique / revise.  The exact count
@@ -10232,7 +10497,7 @@ class NetworkWindow:
         if not slot:
             # Legacy stage-only progress (all review stages without a slot).
             # In serial mode the per-slot calculation below is authoritative;
-            # never jump to 97% when question 1/10 reaches verification.
+            # never jump to 97% when question 1 of the requested set reaches verification.
             if phase in ('final','select'):
                 pct=97+(1 if phase=='final' else 2)*fraction
             else:
@@ -10245,7 +10510,7 @@ class NetworkWindow:
             phase_fraction = (cycle - 1 + (lower + (upper - lower) * fraction)) / maxround
             if phase in ('final', 'select'):
                 phase_fraction = 1.0
-            serial_pct = 100 * ((slot - 1) + min(1.0, phase_fraction)) / 10
+            serial_pct = 100 * ((slot - 1) + min(1.0, phase_fraction)) / target_count
             state['review_value'].set(max(float(state['review_value'].get()),
                                           min(99, serial_pct)))
         state['review_caption'].set(
@@ -10256,22 +10521,23 @@ class NetworkWindow:
     def update_question_window(self,set_id):
         state=self.question_windows.get(set_id)
         if not state or not state['win'].winfo_exists():return
+        target_count=state['question_count']
         status=question_pipeline_status(set_id)
         count,reviewed=question_pipeline_counts(set_id)
-        state['draft_value'].set(min(100,count*10))
-        state['draft_caption'].set(f'Generationprogress :{count}/10  questions already write Database ')
-        published=(status=='ready' and count==10 and reviewed==10)
+        state['draft_value'].set(min(100,count*100/target_count))
+        state['draft_caption'].set(f'Generationprogress :{count}/{target_count}  questions already write Database ')
+        published=(status=='ready' and count==target_count and reviewed==target_count)
         if published:
             state['review_value'].set(100)
             state['stage_value'].set(100)
-            state['review_caption'].set('ReviewCompleted :10/10  questions , final version already public ')
-            state['stage_caption'].set('Final verification: 10/10 questions completed')
+            state['review_caption'].set(f'Review completed: {target_count}/{target_count} questions.')
+            state['stage_caption'].set(f'Final verification: {target_count}/{target_count} questions completed')
             self.question_model_activity(set_id,False,'Model: Idle| can Export  JSON + TXT')
         elif set_id not in self.iteration_jobs:
             # A resumed set may contain saved evaluations, but the number of
             # remaining critique/revision operations is not yet known.
             state['review_caption'].set(
-                f'ReviewWaiting Start / resume : Saved score  {reviewed}/10  questions ( rounds imes not yet Completed )')
+                f'ReviewWaiting Start / resume : Saved score  {reviewed}/{target_count}  questions ( rounds imes not yet Completed )')
         if status=='paused' and set_id not in self.generating_sets and set_id not in self.iteration_jobs:
             self.question_model_activity(set_id,False,'Model: already pause | progress retain in  SQLite')
         state['published']=published
@@ -10282,17 +10548,17 @@ class NetworkWindow:
         detail=state['details']
         if not published:
             # Drafts, feedback and intermediate versions stay on disk, not on screen.
-            for slot in range(1,11):
+            for slot in range(1,target_count+1):
                 table.insert('','end',iid='pending-'+str(slot),values=(slot,'—','—',' not yet CompletedReview( draft hide )'))
             detail.delete('1.0','end')
             detail.insert('1.0',f'Preparing final interdisciplinary mathematical research questions.\n\n'
-                f'Drafts saved: {count}/10\n CompletedModelreview :{reviewed}/10\n\n'
-                +(' ten questions draft already complete all , please in pop upReviewwindow Settings rounds count , click ` StartReview`.\n'
-                 if count==10 and status!='reviewing' and set_id not in self.iteration_jobs else
-                 ' Completed All ten questions after , will then please you confirm and StartReview.\n')
+                f'Drafts saved: {count}/{target_count}\n CompletedModelreview :{reviewed}/{target_count}\n\n'
+                +(' All requested drafts are saved , please in pop upReviewwindow Settings rounds count , click ` StartReview`.\n'
+                 if count==target_count and status!='reviewing' and set_id not in self.iteration_jobs else
+                 ' Complete all requested questions after , will then please you confirm and StartReview.\n')
                 +'Reviewand Revision Finish before NOT Display questions items Content .\n'
                 +'If stopped or interrupted, completed work remains saved and can be resumed.')
-            state['iterate_btn'].configure(state='normal' if count==10 and
+            state['iterate_btn'].configure(state='normal' if count==target_count and
                 set_id not in self.generating_sets and set_id not in self.iteration_jobs else 'disabled')
             return
         state['iterate_btn'].configure(state='disabled')
@@ -10313,16 +10579,16 @@ class NetworkWindow:
         if not state or not state['win'].winfo_exists():return
         if not state.get('published',False):
             messagebox.showwarning('Review Not Complete',
-                ' Complete first ten questionsReviewand Revision , then Export final version .',parent=state['win'])
+                ' Complete all requested questionsReviewand Revision , then Export final version .',parent=state['win'])
             return
         try:
             json_path,txt_path=export_final_question_set(set_id)
         except Exception as exc:
             messagebox.showerror('Failed to Export Final Questions',str(exc),parent=state['win'])
             return
-        state['status'].set('✓  final ten questions already Export :'+str(json_path.parent))
+        state['status'].set(f'✓ Exported {target_count} final questions: '+str(json_path.parent))
         messagebox.showinfo('Export Complete',
-            f' already in  Questions  folder save All ten questions final version :\n\n'
+            f'Exported {target_count} reviewed questions:\n\n'
             f'JSON：{json_path.name}\nTXT：{txt_path.name}\n\n'
             f' Position :{json_path.parent}',parent=state['win'])
 
@@ -10408,10 +10674,11 @@ class NetworkWindow:
         if question_pipeline_status(set_id)=='ready':
             self.update_question_window(set_id)
             return
+        target_count=state['question_count']
         count,_=question_pipeline_counts(set_id)
-        if count!=10:
+        if count!=target_count:
             messagebox.showinfo('Generation Not Complete',
-                f' Current Saved  {count}/10  questions . Complete first  10  questions only then can StartReview.',parent=state['win'])
+                f' Current Saved  {count}/{target_count}  questions . Complete all {target_count} questions only then can StartReview.',parent=state['win'])
             return
         old=self.review_prompts.get(set_id)
         if old is not None and old.winfo_exists():
@@ -10419,7 +10686,7 @@ class NetworkWindow:
 
         parent=state['win']
         dialog=tk.Toplevel(parent)
-        dialog.title('10  questions Completed  ·  Start research review ')
+        dialog.title(f'{target_count} questions ready · Start research review')
         dialog.geometry('445x285')
         dialog.resizable(False,False)
         dialog.configure(bg=self.BG)
@@ -10427,7 +10694,7 @@ class NetworkWindow:
         self.review_prompts[set_id]=dialog
         outer=ttk.Frame(dialog,style='Dark.TFrame',padding=20)
         outer.pack(fill='both',expand=True)
-        ttk.Label(outer,text='✓ 10  questions draft already Generate and save ',style='Dark.TLabel',
+        ttk.Label(outer,text=f'✓ {target_count} questions generated and saved',style='Dark.TLabel',
                   font=('Noto Sans CJK TC',13,'bold')).pack(anchor='w',pady=(0,10))
         ttk.Label(outer,text=' next steps performModelscore , Critique and question revision .',
                   style='Dark.TLabel').pack(anchor='w')
@@ -10445,7 +10712,7 @@ class NetworkWindow:
         def on_later():
             self.dismiss_review_prompt(set_id)
             if set_id in self.question_windows:
-                state['status'].set('✓ 10/10  questions already save , WaitingReview. click ` Settings rounds count / StartReview` can resume .')
+                state['status'].set(f'✓ {target_count}/{target_count} drafts saved. Review can start or resume.')
 
         def on_start():
             try:
@@ -10485,11 +10752,12 @@ class NetworkWindow:
             return
         if set_id in self.iteration_jobs:
             return  # A stopped run may still be inside its current Ollama request.
+        target_count=state['question_count']
         rows=get_question_rows(set_id)
         if set_id in self.generating_sets:
             messagebox.showinfo('Generation in Progress','Wait for question generation to finish, or stop it before starting review.');return
-        if len(rows)!=10 or {r[1] for r in rows}!=set(range(1,11)):
-            messagebox.showinfo('Incomplete Question Set','Generate all ten questions before starting the review workflow.');return
+        if len(rows)!=target_count or {r[1] for r in rows}!=set(range(1,target_count+1)):
+            messagebox.showinfo('Incomplete Question Set',f'Generate all {target_count} questions before starting the review workflow.');return
         if question_pipeline_status(set_id)=='ready':
             self.update_question_window(set_id);return
         try:maxround=int(maxround)
@@ -10512,7 +10780,7 @@ class NetworkWindow:
         state['review_value'].set(0)
         state['stage_value'].set(0)
         state['review_caption'].set(f'Reviewestimated progress : #  1/{maxround}  rounds | prepareModel')
-        state['stage_caption'].set(' Current work : prepare ten questions research score ')
+        state['stage_caption'].set(' Current work : prepare requested questions for research review ')
         self.question_model_activity(set_id,True,'Model: preparing research review ')
         state['iterate_btn'].configure(state='disabled')
         self.update_question_window(set_id)
@@ -10527,7 +10795,7 @@ class NetworkWindow:
                 critic_candidates=(judge_candidates if critic==judge
                                    else available_ollama_models(critic)[0])
                 self.events.put(('v7_iteration_progress',(set_id,
-                    f'Sequential review | 10 questions | up to {maxround} rounds per question; '
+                    f'Sequential review | {target_count} questions | up to {maxround} rounds per question; '
                     'only one Ollama inference at a time.')))
 
                 def stage(slot,description,options,function,*args,**kwargs):
@@ -10537,12 +10805,12 @@ class NetworkWindow:
                         try:
                             return (function(option,*args,**kwargs,
                                 progress=lambda msg:self.events.put(('v7_iteration_progress',
-                                    (set_id,f'Lane {slot}/10 | {description}: {msg}'))),
+                                    (set_id,f'Lane {slot}/{target_count} | {description}: {msg}'))),
                                 cancel_event=stop_event),option)
                         except InterruptedError:raise
                         except Exception as exc:
                             failures.append(f'{option}: {exc}')
-                    raise RuntimeError(f'Lane {slot}/10 {description} failed: '+
+                    raise RuntimeError(f'Lane {slot}/{target_count} {description} failed: '+
                                        '; '.join(failures)[-700:])
 
                 def write_verdict(cid,verdict,used):
@@ -10571,7 +10839,7 @@ class NetworkWindow:
                         self.events.put(('v7_iteration_stage',
                             (set_id,cycle,maxround,'judge',0,1,slot)))
                         self.events.put(('v7_iteration_progress',
-                            (set_id,f'Question {slot}/10 | round {cycle}/{maxround} | evaluating.')))
+                            (set_id,f'Question {slot}/{target_count} | round {cycle}/{maxround} | evaluating.')))
                         with database() as con:
                             row=con.execute('''SELECT id,version,content_json FROM
                                 question_candidates WHERE set_id=? AND slot=? AND current=1
@@ -10598,7 +10866,7 @@ class NetworkWindow:
                                 except (TypeError,ValueError):pass
                         else:
                             self.events.put(('v7_iteration_progress',(set_id,
-                                f'Lane {slot}/10: review round {cycle}/{maxround}')))
+                                f'Lane {slot}/{target_count}: review round {cycle}/{maxround}')))
                             verdict,used=stage(slot,'Review',judge_candidates,
                                 judge_question,question,context,
                                 prior_question=previous_question,
@@ -10622,7 +10890,7 @@ class NetworkWindow:
                             break
                         if stagnant_rounds >= patience:
                             self.events.put(('v7_iteration_progress',
-                                (set_id, f'Question {slot}/10: stopped early after '
+                                (set_id, f'Question {slot}/{target_count}: stopped early after '
                                  f'{stagnant_rounds} rounds without a verified improvement '
                                  f'(score {score_now}); preserving best version.')))
                             break
@@ -10705,28 +10973,28 @@ class NetworkWindow:
                 cancelled = False
                 # One review pipeline at a time; no competing Ollama requests,
                 # no ten-worker queue and no cross-lane SQLite contention.
-                for slot in range(1, 11):
+                for slot in range(1, target_count + 1):
                     if stop_event.is_set():
                         cancelled = True
                         break
                     self.events.put(('v7_iteration_progress',
-                        (set_id, f'Reviewing question {slot}/10 sequentially '
-                         f'(completed {len(completed)}/10).')))
+                        (set_id, f'Reviewing question {slot}/{target_count} sequentially '
+                         f'(completed {len(completed)}/{target_count}).')))
                     try:
                         review_slot(slot)
                         completed.add(slot)
                         self.events.put(('v7_iteration_stage',
                             (set_id,maxround,maxround,'final',1,1,slot)))
                         self.events.put(('v7_iteration_progress',
-                            (set_id, f'Question {slot}/10 saved and verified; '
-                             f'completed {len(completed)}/10.')))
+                            (set_id, f'Question {slot}/{target_count} saved and verified; '
+                             f'completed {len(completed)}/{target_count}.')))
                     except InterruptedError:
                         cancelled = True
                         break
                     except Exception as exc:
                         problems[slot] = str(exc)[:380]
                         self.events.put(('v7_iteration_progress',
-                            (set_id, f'Question {slot}/10 paused: {str(exc)[:180]}')))
+                            (set_id, f'Question {slot}/{target_count} paused: {str(exc)[:180]}')))
                         # The next question may still be reviewed; this one can
                         # be resumed using its persisted candidates/feedback.
                 if cancelled or stop_event.is_set():
@@ -10736,8 +11004,8 @@ class NetworkWindow:
                     self.events.put(('v7_iteration_done',(set_id,True,detail[:1100])))
                 else:
                     drafted,reviewed=question_pipeline_counts(set_id)
-                    if (drafted,reviewed)!=(10,10):
-                        raise RuntimeError('Not all ten final questions have recorded evaluations.')
+                    if (drafted,reviewed)!=(target_count,target_count):
+                        raise RuntimeError('Not all requested final questions have recorded evaluations.')
                     self.events.put(('v7_iteration_done',(set_id,False,None)))
             except InterruptedError:
                 self.events.put(('v7_iteration_done',(set_id,True,None)))
@@ -11982,11 +12250,11 @@ class NetworkWindow:
                     set_id,total,used_model=msg
                     self.update_question_window(set_id)
                     state=self.question_windows.get(set_id)
-                    if state:state['status'].set(f'Stage 1/2: already save draft  {total}/10; Completed AllReviewonly then Display final questions items .')
+                    if state:state['status'].set(f'Stage 1/2: already save draft  {total}/{get_question_count(set_id)}; Completed AllReviewonly then Display final questions items .')
                 elif kind == 'v8_generation_ready':
                     set_id,total=msg
                     self.generating_sets.discard(set_id)
-                    self.question_model_activity(set_id,False,'Model: ten questions Completed , WaitingReviewconfirm ')
+                    self.question_model_activity(set_id,False,'Model: requested questions generated; waiting for review ')
                     self.generation_jobs.pop(set_id,None)
                     self.generation_started.pop(set_id,None)
                     self.generation_activity.pop(set_id,None)
@@ -11994,7 +12262,7 @@ class NetworkWindow:
                     state=self.question_windows.get(set_id)
                     if state:
                         state['generate_btn'].configure(state='normal')
-                        state['status'].set(f'✓  already temporary store  {total}/10  questions ; please in pop up window Settings review rounds after click Start .')
+                        state['status'].set(f'✓  already temporary store  {total}/{get_question_count(set_id)}  questions ; please in pop up window Settings review rounds after click Start .')
                         self.open_review_prompt(set_id)
                 elif kind == 'v8_generation_cancelled':
                     set_id,total=msg
@@ -12008,7 +12276,7 @@ class NetworkWindow:
                     state=self.question_windows.get(set_id)
                     if state:
                         state['generate_btn'].configure(state='normal')
-                        state['status'].set(f'■  Generate already Stop :{total}/10  questions already save ; at any time can Complete missing .')
+                        state['status'].set(f'■  Generate already Stop :{total}/{get_question_count(set_id)}  questions already save ; at any time can Complete missing .')
                 elif kind == 'v8_generation_error':
                     set_id,detail=msg
                     self.question_model_activity(set_id,False,'Model:GenerationFailed , Progress saved ')
@@ -12035,7 +12303,7 @@ class NetworkWindow:
                     self.generating_sets.discard(set_id)
                     state=self.question_windows.get(set_id)
                     if state:state['status'].set('✕  Generate Failed :'+detail[:250])
-                    self.append_log('10  questions Generate Failed :'+detail[:300])
+                    self.append_log('Question generation failed :'+detail[:300])
                 elif kind == 'v7_iteration_stage':
                     set_id,cycle,rounds,phase,done,total,slot=msg
                     self.set_review_stage_progress(set_id,cycle,rounds,phase,done,total,slot)
@@ -12048,7 +12316,7 @@ class NetworkWindow:
                     set_id,slot,score=msg
                     self.update_question_window(set_id)
                     state=self.question_windows.get(set_id)
-                    if state:state['status'].set(f'Question {slot}/10 | latest score: {score if score is not None else None} | serial review in progress.')
+                    if state:state['status'].set(f'Question {slot}/{get_question_count(set_id)} | latest score: {score if score is not None else None} | serial review in progress.')
                 elif kind == 'v7_iteration_done':
                     set_id,stopped,error=msg
                     self.iteration_jobs.pop(set_id,None)
@@ -12056,14 +12324,14 @@ class NetworkWindow:
                     self.question_model_activity(set_id,False,
                         'Model:Reviewalready Finish ' if not stopped else 'Model:ReviewStop / Error , Saved ')
                     drafted,reviewed=question_pipeline_counts(set_id)
-                    finished=(not stopped and not error and drafted==10 and reviewed==10)
+                    finished=(not stopped and not error and drafted==get_question_count(set_id) and reviewed==get_question_count(set_id))
                     set_question_pipeline_status(set_id,'ready' if finished else 'paused')
                     self.update_question_window(set_id)
                     state=self.question_windows.get(set_id)
                     if state:
-                        state['status'].set(('✓  All  10  questions Already passedModelreview and Revision , currently only Display score most best final version .') if finished else
+                        state['status'].set(('✓  All requested questions already passedModelreview and Revision , currently only Display score most best final version .') if finished else
                             ('✕  iterate Failed ; draft still hide , can click resumeReview:'+error[:300] if error else
-                             f'■ Reviewnot yet All Completed ({reviewed}/10); already save but NOT Display draft , can resume .'))
+                             f'■ Reviewnot yet All Completed ({reviewed}/{get_question_count(set_id)}); already save but NOT Display draft , can resume .'))
                         if error:messagebox.showerror('ModelEvaluation iterate Failed ',error[:1100],parent=state['win'])
                 elif kind == "done":
                     self._collector_completion_observed = True
