@@ -6582,6 +6582,44 @@ def available_ollama_models(preferred=DEFAULT_OLLAMA_MODEL):
     return choices, installed
 
 
+def prepare_research_review_model(judge_model, generator_model, critic_model, progress=None):
+    """Select ONE installed Ollama model with ONE bounded service query.
+
+    Review, critique and revision share the same resident model to prevent
+    repeated GPU unload/load cycles. The user's selected judge takes priority;
+    if unavailable, prefer their generator, then their critic, then the usual
+    small-model fallback. No model is downloaded implicitly.
+    """
+    if progress:
+        progress('Connecting to Ollama (checking installed models; 8-second response timeout).')
+    # Optional explicit lower-resource choice, e.g. on a small GPU:
+    #   BRAIN_REVIEW_MODEL=qwen2.5:3b
+    override=str(os.environ.get('BRAIN_REVIEW_MODEL','')).strip()
+    preferred=tuple(dict.fromkeys(normalized_ollama_model(x)
+                    for x in ((override,) if override else ()) +
+                    (judge_model,generator_model,critic_model)))
+    # This is the only /api/tags request in review startup.
+    available,installed=available_ollama_models(preferred[0])
+    installed_set=set(installed)
+    if override and preferred[0] not in installed_set:
+        raise RuntimeError(f'BRAIN_REVIEW_MODEL={preferred[0]} is not installed. '
+                           'Run `ollama list` to check installed model names.')
+    selected=next((name for name in preferred if name in installed_set),None)
+    if selected is None:
+        selected=next((name for name in (FALLBACK_OLLAMA_MODEL,DEFAULT_OLLAMA_MODEL)
+                       if name in installed_set),None)
+    if selected is None:
+        raise RuntimeError('None of the configured question-review models are installed. '
+            'Use `ollama list` and install qwen2.5:3b or the selected judge model.')
+    if progress:
+        if selected!=preferred[0]:
+            progress(f'Selected judge model {preferred[0]} is unavailable; using installed {selected}.')
+        else:
+            progress(f'Ollama connected; using {selected} for ALL review/revision stages '
+                     '(single model, one inference at a time).')
+    return selected
+
+
 def check_ollama(model=DEFAULT_OLLAMA_MODEL):
     """Report which small localModelis ready; never require DeepSeek 14B."""
     choices,_=available_ollama_models(model)
@@ -9498,6 +9536,7 @@ class NetworkWindow:
         self.question_windows={}
         self.iteration_jobs={}
         self.review_started={}
+        self.review_activity={}
         self.generating_sets=set()
         self.generation_activity={}
         self.generation_jobs={}
@@ -10514,7 +10553,7 @@ class NetworkWindow:
             state['review_value'].set(max(float(state['review_value'].get()),
                                           min(99, serial_pct)))
         state['review_caption'].set(
-            f'Review | question {slot or "?"}/10 | round {min(cycle,maxround)}/{maxround} |{name}'
+            f'Review | question {slot or "?"}/{target_count} | round {min(cycle,maxround)}/{maxround} |{name}'
             +(' (final verification)' if phase in ('final','select') else ''))
         state['review_cycle']=cycle
 
@@ -10776,27 +10815,34 @@ class NetworkWindow:
         stop_event=threading.Event()
         self.iteration_jobs[set_id]=stop_event
         self.review_started[set_id]=time.monotonic()
+        self.review_activity[set_id]=(time.monotonic(),'Connecting to Ollama')
         set_question_pipeline_status(set_id,'reviewing')
         state['review_value'].set(0)
         state['stage_value'].set(0)
-        state['review_caption'].set(f'Reviewestimated progress : #  1/{maxround}  rounds | prepareModel')
-        state['stage_caption'].set(' Current work : prepare requested questions for research review ')
-        self.question_model_activity(set_id,True,'Model: preparing research review ')
+        state['review_caption'].set(f'Review 0/{target_count} questions | up to {maxround} rounds each')
+        state['stage_caption'].set('Connecting to Ollama: verifying locally installed model...')
+        self.question_model_activity(set_id,True,'Model: checking Ollama connection (8s timeout)')
         state['iterate_btn'].configure(state='disabled')
         self.update_question_window(set_id)
         state['status'].set(f'Sequential review: one question and one model call at a time, up to {maxround} rounds per question. Completed versions are saved.')
         def worker():
             try:
-                generator_candidates,_=available_ollama_models(generator)
-                judge_candidates=(generator_candidates if judge==generator
-                                  else available_ollama_models(judge)[0])
-                # A separate critic is only queried if the integrated judge
-                # feedback is insufficient or explicitly requested.
-                critic_candidates=(judge_candidates if critic==judge
-                                   else available_ollama_models(critic)[0])
+                # In the former implementation these were THREE sequential /api/tags
+                # requests with no progress event until all returned. On an unwell
+                # Ollama server the UI stayed at "preparing research review".
+                self.events.put(('v7_iteration_progress', (set_id,
+                    'Review startup: connecting to Ollama; checking model availability.')))
+                report=lambda msg:self.events.put(('v7_iteration_progress',(set_id,msg)))
+                selected=prepare_research_review_model(
+                    judge,generator,critic,progress=report)
+                # Keep exactly one model loaded: no fallback chain repeatedly
+                # unloading/reloading a different 3B/4B model on small GPUs.
+                generator_candidates=[selected]
+                judge_candidates=[selected]
+                critic_candidates=[selected]
                 self.events.put(('v7_iteration_progress',(set_id,
-                    f'Sequential review | {target_count} questions | up to {maxround} rounds per question; '
-                    'only one Ollama inference at a time.')))
+                    f'Sequential review ready | {target_count} questions, max {maxround} rounds '
+                    f'| model {selected} | only one inference at a time.')))
 
                 def stage(slot,description,options,function,*args,**kwargs):
                     failures=[]
@@ -11011,7 +11057,19 @@ class NetworkWindow:
                 self.events.put(('v7_iteration_done',(set_id,True,None)))
             except Exception as exc:
                 self.events.put(('v7_iteration_done',(set_id,True,str(exc))))
-        self._start_background_thread(target=worker, name=f'BrainReview-{set_id}')
+        try:
+            started=self._start_background_thread(target=worker, name=f'BrainReview-{set_id}')
+            if started is None:
+                raise RuntimeError('Application is shutting down; review worker was not started.')
+        except BaseException as exc:
+            # A failed thread launch must not leave the review button disabled.
+            self.iteration_jobs.pop(set_id,None)
+            self.review_started.pop(set_id,None)
+            set_question_pipeline_status(set_id,'paused')
+            self.question_model_activity(set_id,False,'Model: review did not start')
+            self.update_question_window(set_id)
+            state['status'].set('Review could not start: '+str(exc)[:300])
+            raise
 
     def _mark_resource_override(self, _event=None):
         """Preserve operator-chosen CPU/worker settings across a live refresh."""
@@ -12309,6 +12367,7 @@ class NetworkWindow:
                     self.set_review_stage_progress(set_id,cycle,rounds,phase,done,total,slot)
                 elif kind == 'v7_iteration_progress':
                     set_id,description=msg
+                    self.review_activity[set_id]=(time.monotonic(),str(description))
                     state=self.question_windows.get(set_id)
                     if state:state['status'].set(description)
                     self.question_model_activity(set_id,True,'Model:'+str(description)[-65:])
@@ -12321,6 +12380,7 @@ class NetworkWindow:
                     set_id,stopped,error=msg
                     self.iteration_jobs.pop(set_id,None)
                     self.review_started.pop(set_id,None)
+                    self.review_activity.pop(set_id,None)
                     self.question_model_activity(set_id,False,
                         'Model:Reviewalready Finish ' if not stopped else 'Model:ReviewStop / Error , Saved ')
                     drafted,reviewed=question_pipeline_counts(set_id)
@@ -12429,8 +12489,18 @@ class NetworkWindow:
                 started=self.review_started.get(job)
                 if state is not None and started is not None:
                     elapsed=int(now-started)
-                    state['request_caption'].set(
-                        f'Modelactivity :Reviewalready run  {elapsed}  seconds | single imes please request duration NOT fixed define ')
+                    last_at,last_msg=self.review_activity.get(job,(started,'Initializing'))
+                    idle=int(now-last_at)
+                    if idle >= 35:
+                        stage=('No progress for '+str(idle)+'s. Check `ollama ps`, RAM/VRAM, '
+                               'and `ollama list`; Stop preserves saved questions.')
+                        state['request_caption'].set(f'Review {elapsed}s | '+stage)
+                        state['status'].set(f'⚠ Review waiting {idle}s since last event: '
+                            +last_msg[:115]+'. '+stage)
+                    else:
+                        state['request_caption'].set(
+                            f'Review running {elapsed}s | latest update {idle}s ago | '
+                            +last_msg[-85:])
         # A verified frontier is a dated snapshot; let the user recheck when
         # its finite freshness window expires without restarting the desktop.
         if (self._frontier_shown_complete and
