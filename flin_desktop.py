@@ -40,7 +40,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -1506,14 +1506,151 @@ def _export_checkpoint(stop_event):
         raise NetworkExportCancelled(' Export already cancel ; not yet Completed temporary store Data already clear .')
 
 
-def _read_only_database():
-    if not DB_PATH.is_file():
-        raise FileNotFoundError(' cannot find existing Memory unit Database :' + str(DB_PATH))
-    uri = DB_PATH.resolve().as_uri() + '?mode=ro'
+def _read_only_database(path=None):
+    source_path = Path(path) if path is not None else DB_PATH
+    if not source_path.is_file():
+        raise FileNotFoundError(' cannot find existing Memory unit Database :' + str(source_path))
+    uri = source_path.resolve().as_uri() + '?mode=ro'
     con = sqlite3.connect(uri, uri=True, timeout=30)
     con.execute('PRAGMA busy_timeout=30000')
     con.execute('PRAGMA query_only=ON')
     return con
+
+
+def flin_export_counts(con):
+    """Exact graph counts; the active FLIN graph is abc_*, NOT legacy units/edges.
+
+    Reads a single SQLite connection/snapshot. No rendering or sample LIMIT.
+    """
+    names = {name for (name,) in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    needed = {'abc_units', 'abc_edges'}
+    if not needed.issubset(names):
+        raise RuntimeError('FLIN associative graph tables are missing: ' +
+                           ', '.join(sorted(needed - names)))
+    values = {
+        'flin_units_all': int(con.execute('SELECT COUNT(*) FROM abc_units').fetchone()[0]),
+        'flin_units_active': int(con.execute(
+            "SELECT COUNT(*) FROM abc_units WHERE status='active'").fetchone()[0]),
+        'flin_edges_all': int(con.execute('SELECT COUNT(*) FROM abc_edges').fetchone()[0]),
+    }
+    values['flin_units_other'] = values['flin_units_all'] - values['flin_units_active']
+    for table in ('units', 'edges'):
+        values['legacy_' + table] = (int(con.execute(
+            f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]) if table in names else None)
+    return values
+
+
+def _verify_sqlite_graph_file(path, expected, *, mirror=False):
+    """Fail closed if a completed SQLite export has lost even one unit/link."""
+    path = Path(path)
+    with contextlib.closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as con:
+        check = con.execute('PRAGMA quick_check').fetchone()
+        if not check or check[0] != 'ok':
+            raise RuntimeError('SQLite integrity check failed: ' + str(check))
+        if mirror:
+            actual = {
+                'flin_units_all': int(con.execute('SELECT COUNT(*) FROM units').fetchone()[0]),
+                'flin_units_active': int(con.execute(
+                    "SELECT COUNT(*) FROM units WHERE status='active'").fetchone()[0]),
+                'flin_edges_all': int(con.execute('SELECT COUNT(*) FROM edges').fetchone()[0]),
+            }
+        else:
+            actual = flin_export_counts(con)
+        for key in ('flin_units_all', 'flin_units_active', 'flin_edges_all'):
+            if actual[key] != expected[key]:
+                raise RuntimeError(f'Incomplete FLIN export: {key}: '
+                                   f'expected {expected[key]:,}, found {actual[key]:,}')
+        return actual
+
+
+def _make_flin_graph_sqlite(full_snapshot, output_path, expected, *, stop_event=None,
+                            progress=None):
+    """Create a standalone FULL FLIN graph for ordinary SQLite graph readers.
+
+    This is an *analysis copy*, not the restorable full application backup.
+    The original full backup, including legacy tables and all provenance, is
+    separately preserved unchanged as association.sqlite3.
+    """
+    output_path = Path(output_path)
+    with contextlib.closing(sqlite3.connect(Path(full_snapshot).as_uri() + '?mode=ro',
+                                           uri=True)) as src:
+        with contextlib.closing(sqlite3.connect(str(output_path))) as dst:
+            dst.execute('PRAGMA journal_mode=DELETE')
+            dst.executescript("""
+                CREATE TABLE units (
+                    id TEXT PRIMARY KEY, label TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'concept',
+                    description TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '',
+                    citations INTEGER NOT NULL DEFAULT 0, support INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL, quality INTEGER NOT NULL,
+                    evidence_count INTEGER NOT NULL, created TEXT
+                );
+                CREATE TABLE edges (
+                    src TEXT NOT NULL, dst TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'association',
+                    weight REAL NOT NULL, support INTEGER NOT NULL,
+                    observations INTEGER NOT NULL,
+                    PRIMARY KEY(src,dst,kind)
+                );
+                CREATE TABLE export_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+            def transfer(query, insert, label):
+                cursor = src.execute(query)
+                size = 0
+                while True:
+                    _export_checkpoint(stop_event)
+                    batch = cursor.fetchmany(4000)
+                    if not batch:
+                        break
+                    with dst:
+                        dst.executemany(insert, batch)
+                    size += len(batch)
+                    if progress:
+                        progress('FLIN graph ' + label, size, expected['flin_' + label + '_all'])
+                return size
+            nodes = transfer("""SELECT id,label,'concept',definition,'',0,
+                            evidence_count,status,quality,evidence_count,created
+                            FROM abc_units""",
+                            """INSERT INTO units(id,label,kind,description,url,citations,
+                                support,status,quality,evidence_count,created)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", 'units')
+            edges = transfer("""SELECT src,dst,'association',weight,observations,observations
+                            FROM abc_edges""",
+                            """INSERT INTO edges(src,dst,kind,weight,support,observations)
+                                VALUES(?,?,?,?,?,?)""", 'edges')
+            if nodes != expected['flin_units_all'] or edges != expected['flin_edges_all']:
+                raise RuntimeError('FLIN graph transfer did not copy all associative records.')
+            with dst:
+                dst.executemany('INSERT INTO export_metadata(key,value) VALUES(?,?)',
+                    [('graph_source_units','abc_units'),('graph_source_edges','abc_edges'),
+                     ('source_format','FLIN association network'),
+                     ('purpose','standalone graph analysis; use association.sqlite3 to restore FLIN'),
+                     ('source_snapshot', 'association.sqlite3'),
+                     ('counts_json',json.dumps(expected,sort_keys=True))])
+                dst.execute('CREATE INDEX idx_flin_edges_src ON edges(src)')
+                dst.execute('CREATE INDEX idx_flin_edges_dst ON edges(dst)')
+                dst.execute('CREATE INDEX idx_flin_units_status ON units(status)')
+    return _verify_sqlite_graph_file(output_path, expected, mirror=True)
+
+
+def _write_flin_export_report(directory, counts, mode, *, files=None, source_db=None):
+    payload = {
+        'format': 'FLIN complete export verification v1',
+        'mode': mode,
+        'source_database': str(source_db) if source_db is not None else None,
+        'source_of_truth': {'units':'abc_units','edges':'abc_edges'},
+        'counts': counts,
+        'files': files or [],
+        'verified': True,
+        'notes': ('FLIN active units are abc_units rows with status=active; '
+                  'all FLIN units include candidates. FLIN links are abc_edges. '
+                  'Legacy units/edges are separate research/provenance structures. '
+                  'Counts describe a point-in-time SQLite snapshot.'),
+    }
+    (Path(directory) / 'FLIN_EXPORT_VERIFICATION.json').write_text(
+        json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
+    return payload
 
 
 def _safe_export_destination(parent_dir, prefix='brain_network'):
@@ -1536,6 +1673,9 @@ def _export_readme():
     return """Brain_Project Portable Memory Network /  can portable associative network 
 =========================================================
 FORMAT: Brain_Project portable directed graph, schema_version=1
+IMPORTANT: FLIN ASSOCIATIVE NETWORK = abc_units.jsonl.gz / abc_edges.jsonl.gz.
+The separate units.jsonl.gz / edges.jsonl.gz describe the LEGACY graph.
+See FLIN_EXPORT_VERIFICATION.json for exact FLIN node/edge counts.
 ENCODING: UTF-8, JSON Lines, gzip compression (*.jsonl.gz)
 
 Core files:
@@ -1576,7 +1716,7 @@ use the separate SQLite snapshot export option instead.
 
 
 def export_memory_network(parent_dir, mode='portable', with_sources=True,
-                          stop_event=None, progress=None):
+                          stop_event=None, progress=None, source_db_path=None):
     """Consistently export the complete stored graph without loading it into RAM.
 
     Output is a new directory inside parent_dir. Supports:
@@ -1584,6 +1724,7 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
       sqlite: SQLite online backup (preserves questions, logs and every table)
     Returns the final output directory. Callback receives (stage, rows, total).
     """
+    source_db_path = Path(source_db_path or DB_PATH).expanduser().resolve()
     if mode not in ('portable', 'sqlite'):
         raise ValueError(' NOT support Export format :' + str(mode))
     _export_checkpoint(stop_event)
@@ -1594,22 +1735,46 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
             progress(stage, done, total)
     try:
         if mode == 'sqlite':
-            report(' Build complete  SQLite  snapshot ', 0, 0)
-            with contextlib.closing(_read_only_database()) as src:
-                with contextlib.closing(sqlite3.connect(str(stage_dir / 'association.sqlite3'))) as dst:
+            report('Create complete SQLite snapshot (including all FLIN tables)', 0, 0)
+            snapshot = stage_dir / 'association.sqlite3'
+            with contextlib.closing(_read_only_database(source_db_path)) as src:
+                with contextlib.closing(sqlite3.connect(str(snapshot))) as dst:
                     def on_backup(status, remaining, total):
                         _export_checkpoint(stop_event)
-                        report(' Processing backup Database page ', total-remaining, total)
+                        report('Backing up SQLite database pages', total-remaining, total)
                     src.backup(dst, pages=512, progress=on_backup, sleep=0.05)
             _export_checkpoint(stop_event)
+            # Verify the *exported snapshot*, not a concurrently changing live DB.
+            with contextlib.closing(sqlite3.connect(snapshot.as_uri() + '?mode=ro',
+                                                    uri=True)) as snapshot_con:
+                counts = flin_export_counts(snapshot_con)
+            _verify_sqlite_graph_file(snapshot, counts)
+            report('Export FLIN associative graph (not legacy tables)', 0,
+                   counts['flin_units_all'] + counts['flin_edges_all'])
+            _make_flin_graph_sqlite(snapshot, stage_dir / 'flin_graph.sqlite3', counts,
+                                    stop_event=stop_event, progress=report)
+            _export_checkpoint(stop_event)
+            _write_flin_export_report(stage_dir, counts, 'sqlite',
+                 files=['association.sqlite3', 'flin_graph.sqlite3'],source_db=source_db_path)
             (stage_dir / 'README.txt').write_text(
-                'Brain_Project  complete  SQLite  Database snapshot .\n'
-                ' use  Python sqlite3.connect(\"association.sqlite3\")  or its they  SQLite  driver read .\n'
-                ' primary Data table :units(id,...), edges(src,dst,kind,weight,support),\n'
-                'papers, relation_evidence, positions. this backup also includes question and score Log .\n'
-                ' available in other applications ; should not directly in Export in the file run this application building Workflow .\n',
+                'FLIN complete verified SQLite export\n'
+                '====================================\n'
+                'flin_graph.sqlite3: FLIN ASSOCIATIVE MEMORY NETWORK.\n'
+                '  Its units table represents ALL abc_units (including inactive candidates),\n'
+                '  and edges represents ALL directed abc_edges.\n'
+                '  Filter units.status=active for triggerable memories.\n'
+                '  This is the file to open in external SQLite/network analysis tools.\n\n'
+                'association.sqlite3: COMPLETE APPLICATION BACKUP.\n'
+                '  It preserves ALL original application tables, events, documents,\n'
+                '  historical legacy units/edges, and FLIN abc_units/abc_edges.\n'
+                '  This is the file to import into FLIN to restore the network.\n\n'
+                'FLIN_EXPORT_VERIFICATION.json: exact counts independently verified\n'
+                'against the exported snapshot and FLIN graph analysis copy.\n'
+                '3D render sampling is NEVER applied to either SQLite file.\n',
                 encoding='utf-8')
-            report('SQLite  complete snapshot Completed ', 1, 1)
+            report('Verified complete FLIN snapshot and graph',
+                   counts['flin_units_all'] + counts['flin_edges_all'],
+                   counts['flin_units_all'] + counts['flin_edges_all'])
         else:
             metadata = {
                 'format': 'brain-project-directed-memory-network',
@@ -1628,7 +1793,7 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
                           'Visual overview sampling does not apply.'),
                 'tables': {},
             }
-            with contextlib.closing(_read_only_database()) as con:
+            with contextlib.closing(_read_only_database(source_db_path)) as con:
                 # Keep one logical point-in-time view while reading every table.
                 con.execute('BEGIN')
                 names = {r[0] for r in con.execute(
@@ -1636,7 +1801,8 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
                 tables = EXPORT_CORE_TABLES + (EXPORT_PROVENANCE_TABLES if with_sources else ())
                 tables = [name for name in tables if name in names]
                 core_totals = {t: con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
-                               for t in ('units','edges') if t in names}
+                               for t in ('abc_units','abc_edges') if t in names}
+                counts = flin_export_counts(con)
                 expected = sum(core_totals.values())
                 core_progress = 0
                 for tablename in tables:
@@ -1667,6 +1833,15 @@ def export_memory_network(parent_dir, mode='portable', with_sources=True,
                     }
                     report(' Completed  ' + tablename + f'({n:,}  records )',core_progress, expected)
                 con.rollback()
+            for key, tablename in (('flin_units_all','abc_units'), ('flin_edges_all','abc_edges')):
+                written = metadata['tables'].get(tablename, {}).get('rows')
+                if written != counts[key]:
+                    raise RuntimeError(f'Incomplete portable FLIN export: {tablename}: '
+                                       f'expected {counts[key]:,}, wrote {written!r}')
+            metadata['flin_graph_counts'] = counts
+            metadata['primary_graph_tables'] = {'units':'abc_units','edges':'abc_edges'}
+            _write_flin_export_report(stage_dir, counts, 'portable',
+                                      files=['abc_units.jsonl.gz','abc_edges.jsonl.gz'],source_db=source_db_path)
             _export_checkpoint(stop_event)
             (stage_dir / 'manifest.json').write_text(
                 json.dumps(metadata, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -12410,17 +12585,17 @@ class NetworkWindow:
         main = ttk.Frame(win, style='Side.TFrame',padding=20)
         main.pack(fill='both',expand=True)
         self.label(main,' complete Network Export ',note=False).pack(anchor='w',pady=(0,7))
-        self.label(main,' Export is  SQLite  in All Node and Directed Link , NOT receive  3D  overview sampling Limit .',
+        self.label(main,'Complete FLIN export reads abc_units/abc_edges, not the legacy units/edges or sampled 3D view.',
                    note=True,wraplength=530).pack(anchor='w')
-        mode = tk.StringVar(value='portable')
+        mode = tk.StringVar(value='sqlite')
         row = ttk.Frame(main,style='Side.TFrame');row.pack(fill='x',pady=(12,7))
         ttk.Radiobutton(row,text=' can portable  JSONL.gz',value='portable',variable=mode,style='Dark.TRadiobutton').pack(side='left')
-        ttk.Radiobutton(row,text=' complete  SQLite  backup ',value='sqlite',variable=mode,style='Dark.TRadiobutton').pack(side='left',padx=18)
+        ttk.Radiobutton(row,text='Full SQLite + FLIN graph (recommended)',value='sqlite',variable=mode,style='Dark.TRadiobutton').pack(side='left',padx=18)
         sources = tk.BooleanVar(value=True)
         chk=ttk.Checkbutton(main,text='JSONL  simultaneously Export Paper , original passage Evidence and literature provider ',
                             variable=sources,style='Dark.TCheckbutton')
         chk.pack(anchor='w',pady=(2,8))
-        info=tk.StringVar(value='JSONL.gz  cross-process can line by line read ;SQLite  complete retain All history and question Evaluation .')
+        info=tk.StringVar(value='SQLite mode saves association.sqlite3 (restorable) and flin_graph.sqlite3 (all FLIN nodes/links for analysis).')
         self.label(main,'',textvariable=info,note=True,wraplength=530).pack(anchor='w')
         def change_mode(*_):
             chk.configure(state='normal' if mode.get()=='portable' else 'disabled')
@@ -12453,13 +12628,14 @@ class NetworkWindow:
             working['value']=True
             selected_mode=mode.get()
             selected_sources=sources.get()
+            selected_network_db=Path(DB_PATH).resolve()
             cancel_flag.clear()
             start_button.configure(state='disabled')
             status.set(' prepare Export ,Please Wait...')
             def worker():
                 try:
                     path=export_memory_network(dest,mode=selected_mode,with_sources=selected_sources,
-                        stop_event=cancel_flag,
+                        stop_event=cancel_flag,source_db_path=selected_network_db,
                         progress=lambda stage,done,total: messages.put(('progress',stage,done,total)))
                     messages.put(('done',str(path)))
                 except NetworkExportCancelled as exc:
@@ -12495,9 +12671,20 @@ class NetworkWindow:
                     start_button.configure(state='normal')
                     if entry[0]=='done':
                         pb.configure(value=100)
-                        status.set('✓ Export Complete:'+entry[1])
-                        self.append_log('✓  Network Export :'+entry[1])
-                        messagebox.showinfo('Export Complete','The complete memory network was exported to: \n'+entry[1],parent=win)
+                        status.set('✓ FLIN export verified: '+entry[1])
+                        report_path=Path(entry[1])/'FLIN_EXPORT_VERIFICATION.json'
+                        summary=''
+                        if report_path.is_file():
+                            counts=json.loads(report_path.read_text(encoding='utf-8'))['counts']
+                            summary=(f'\nFLIN active units: {counts["flin_units_active"]:,}'
+                                     f'\nFLIN total units: {counts["flin_units_all"]:,}'
+                                     f'\nFLIN directed edges: {counts["flin_edges_all"]:,}')
+                        self.append_log('✓ Verified FLIN export: '+entry[1]+summary)
+                        messagebox.showinfo('FLIN Export Verified',
+                            'Exported ALL FLIN memory units and directed edges.\n'
+                            'Open flin_graph.sqlite3 for standalone graph analysis, or\n'
+                            'association.sqlite3 to restore the complete application.\n'
+                            +entry[1]+summary,parent=win)
                     elif entry[0]=='cancel':
                         status.set(entry[1])
                     else:
@@ -12525,14 +12712,16 @@ class NetworkWindow:
             with database() as src, sqlite3.connect(str(dest / (name + ".sqlite3"))) as dst:
                 src.backup(dst)
             # GraphML is optional on huge networks; SQLite backup always contains everything.
-            with database() as con:
-                sizes = stats(con)
-            skip_graphml = sizes[2] > 65000 or sizes[3] > 180000
+            with contextlib.closing(sqlite3.connect(str(dest / (name + '.sqlite3')))) as exported:
+                counts=flin_export_counts(exported)
+            _verify_sqlite_graph_file(dest / (name + '.sqlite3'),counts)
+            skip_graphml = counts['flin_units_all'] > 65000 or counts['flin_edges_all'] > 180000
             if skip_graphml:
                 self.append_log(' large-scale Network already backup  SQLite; Node / Link above passed  GraphML  install all Export maximum , omit passed  GraphML.')
             if not skip_graphml:
                 self._export_graphml(dest / (name + '.graphml'))
-            self.append_log("✓  Saved complete  SQLite  snapshot :" + str(dest / name))
+            self.append_log('✓ Verified FLIN SQLite snapshot: '+str(dest/(name+'.sqlite3'))+
+                            f' | units {counts["flin_units_all"]:,}, edges {counts["flin_edges_all"]:,}')
             messagebox.showinfo('Network Snapshot Saved',
                 'SQLite  all amount backup Completed .' + (' large-scale Network omit passed  GraphML.' if skip_graphml else 'GraphML  also already Export .')
                 + '\n store Path :\n' + str(dest))
@@ -12541,26 +12730,20 @@ class NetworkWindow:
             messagebox.showerror('Failed to Save File',str(e))
 
     def _export_graphml(self, path):
-        # GraphML interoperates with Cytoscape and Gephi; no network access needed.
+        """Export the ACTIVE FLIN graph, not the separate legacy research graph."""
         with database() as con:
             graph = nx.DiGraph()
-            for uid, label, kind, desc, url, cites, support in con.execute(
-                "SELECT id,label,kind,description,url,citations,support FROM units"):
-                graph.add_node(uid, label=label or "", kind=kind or "",
-                               description=desc or "", url=url or "",
-                               citations=int(cites or 0), support=int(support or 0))
-            for src, dst, kind, w, support in con.execute(
-                "SELECT src,dst,kind,weight,support FROM edges"):
+            for uid,label,status,quality,evidence_count in con.execute(
+                    'SELECT id,label,status,quality,evidence_count FROM abc_units'):
+                graph.add_node(uid,label=label or '',status=status,
+                               quality=int(quality),evidence_count=int(evidence_count))
+            for src,dst,weight,observations in con.execute(
+                    'SELECT src,dst,weight,observations FROM abc_edges'):
                 if src not in graph or dst not in graph:
-                    continue
-                # GraphML DiGraph cannot have parallel edges: accumulate their weights.
-                if graph.has_edge(src, dst):
-                    graph[src][dst]["weight"] += float(w)
-                    graph[src][dst]["support"] += int(support)
-                    graph[src][dst]["kind"] += "," + kind
-                else:
-                    graph.add_edge(src, dst, kind=kind, weight=float(w), support=int(support))
-        nx.write_graphml(graph, path)
+                    raise RuntimeError('FLIN edge has a missing endpoint: '+str(src)+' -> '+str(dst))
+                graph.add_edge(src,dst,weight=float(weight),
+                               observations=int(observations))
+        nx.write_graphml(graph,path)
 
     def open_scholar(self):
         info = self.all_nodes.get(self.chosen, {}) if hasattr(self, "all_nodes") else {}
@@ -13204,8 +13387,10 @@ if __name__ == "__main__":
     parser.add_argument('--switch-network',metavar='ID',help='Select a saved network (see --list-networks for IDs)')
     parser.add_argument('--import-network',metavar='PATH',help='Import and select a complete SQLite or JSONL.gz network')
     parser.add_argument('--network-name',metavar='NAME',help='Set the display name for a command-line network import')
+    parser.add_argument('--verify-export',metavar='EXPORTED_SQLITE_OR_DIR',
+                        help='Verify exported FLIN abc_units/abc_edges or analysis graph counts and SQLite integrity')
     parser.add_argument('--export-network',metavar='OUTPUT_DIR',help='Export the complete directed network to a destination directory')
-    parser.add_argument('--export-format',choices=('portable','sqlite'),default='portable',
+    parser.add_argument('--export-format',choices=('portable','sqlite'),default='sqlite',
                         help='portable: compressed JSONL and manifest; sqlite: full database snapshot')
     parser.add_argument('--no-export-sources',action='store_true',
                         help='For portable exports, omit literature provenance and include only graph data and metadata')
@@ -13379,6 +13564,29 @@ if __name__ == "__main__":
         output=export_curated_math_network(args.export_curated_network,
             progress=lambda table,n:print(f'{table} {n:,}...',flush=True))
         print(' Completed :',output,flush=True)
+    elif args.verify_export:
+        target=Path(args.verify_export).expanduser().resolve()
+        if target.is_dir():
+            target=target/'association.sqlite3'
+        if not target.is_file():
+            parser.error('Exported SQLite file not found: '+str(target))
+        try:
+            with contextlib.closing(sqlite3.connect(target.as_uri()+'?mode=ro',uri=True)) as src:
+                names={r[0] for r in src.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                if {'abc_units','abc_edges'}.issubset(names):
+                    counts=flin_export_counts(src)
+                    _verify_sqlite_graph_file(target,counts)
+                elif {'units','edges','export_metadata'}.issubset(names):
+                    counts=dict(src.execute('SELECT key,value FROM export_metadata'))
+                    counts=json.loads(counts['counts_json'])
+                    _verify_sqlite_graph_file(target,counts,mirror=True)
+                else:
+                    raise RuntimeError('No FLIN associative graph found in exported SQLite.')
+            print(json.dumps({'file':str(target),'verified':True,'counts':counts},indent=2))
+        except Exception as exc:
+            print('FLIN integrity check failed:',str(exc),file=sys.stderr)
+            sys.exit(1)
     elif args.export_network:
         try:
             print(' Start Export Memory unit Network ; large-scale Network needs sufficient disk space .', flush=True)
