@@ -8111,6 +8111,33 @@ def set_question_review_round_limit(set_id, rounds):
             con.execute('UPDATE question_sets SET review_round_limit=? WHERE id=?',(rounds,set_id))
 
 
+def select_best_reviewed_question(con, set_id, slot):
+    """Choose solely among EXISTING evaluated versions; never call a model.
+
+    The evaluator score already incorporates mathematical/topic-linkage penalties.
+    Topic and revision audits are retained as *diagnostics* instead of redundant
+    end-of-set acceptance gates.  This avoids rejecting a question solely because
+    one auxiliary record was absent after an otherwise successful review round.
+    """
+    return con.execute('''SELECT q.id, MAX(f.score) AS best_score
+        FROM question_candidates q
+        JOIN question_feedback f ON f.candidate_id=q.id
+        WHERE q.set_id=? AND q.slot=? AND f.role='evaluator'
+          AND f.score IS NOT NULL
+        GROUP BY q.id
+        ORDER BY best_score DESC, q.version DESC, q.id DESC LIMIT 1''',
+        (set_id, slot)).fetchone()
+
+
+def reviewed_question_round_count(con, set_id, slot):
+    """Number of distinctly evaluated versions, including earlier resumed work."""
+    return int(con.execute('''SELECT COUNT(DISTINCT q.id)
+        FROM question_candidates q JOIN question_feedback f
+          ON f.candidate_id=q.id
+        WHERE q.set_id=? AND q.slot=? AND f.role='evaluator'
+          AND f.score IS NOT NULL''', (set_id, slot)).fetchone()[0])
+
+
 def question_pipeline_counts(set_id):
     """Count current draft slots and reviewed slots, without loading contents."""
     with database() as con:
@@ -8171,13 +8198,15 @@ def export_final_question_set(set_id, base_dir=None):
             if feedback is None:
                 raise ValueError(f' #  {slot}  questions missingModelreview score , Unable to Export .')
             score,comment,rubric_json,reviewer,reviewed_at=feedback
+            completed_rounds=reviewed_question_round_count(con,set_id,slot)
             topicrow=con.execute('''SELECT score,rubric_json FROM question_feedback
                 WHERE candidate_id=? AND role='topic_alignment'
                 ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
             # Pre-upgrade READY sets did not run a dedicated topic review.
             # Preserve their exportability but explicitly mark the audit missing.
-            if topicrow is not None and topicrow[0]!=1:
-                raise ValueError(f'Question {slot}: required topics failed alignment review.')
+            # The per-round topic verdict has ALREADY affected the evaluator
+            # score.  Export the assessed result with a visible warning instead
+            # of applying another hard failure after all requested rounds.
             try: topic_report=json.loads(topicrow[1]) if topicrow else None
             except (TypeError,ValueError): topic_report=None
             problem=json.loads(content_json)
@@ -8193,11 +8222,15 @@ def export_final_question_set(set_id, base_dir=None):
             except (TypeError,ValueError):comparison=None
             questions.append({
                 'number':slot,'candidate_id':cid,'version':version,
+                'review_rounds_completed':completed_rounds,
+                'review_rounds_requested':round_limit,
                 'generator_model':model,'version_created_at':version_created,
                 'problem':problem,'revision_comparison':comparison,
                 'topic_alignment':topic_report,
-                'topic_alignment_status':('Passed model review' if topicrow else
-                    'Legacy / Not assessed'),
+                'topic_alignment_status':(
+                    'Passed model review' if topicrow and topicrow[0]==1 else
+                    'Needs improvement / Missing requested topic linkage'
+                    if topicrow else 'Legacy / Not assessed'),
                 'review':{'score':score,'max_score':100,'model':reviewer,
                           'comment':comment,'rubric':rubric,'reviewed_at':reviewed_at},
             })
@@ -8224,7 +8257,7 @@ def export_final_question_set(set_id, base_dir=None):
         return '' if value is None else str(value)
 
     text_lines=[
-        'FLIN — Final Interdisciplinary Mathematical Research Questions (reviewed and revised)',
+        'FLIN — Reviewed Mathematical Research Question Candidates',
         '='*60,
         f'Question set: {set_id}',f'Research topic: {topic}',
         f'Maximum model-review rounds: {round_limit}',f'Exported at (UTC): {exported_at}',
@@ -8241,6 +8274,7 @@ def export_final_question_set(set_id, base_dir=None):
         ])
         if topic:
             text_lines.append('Requested subjects: '+str(topic))
+        text_lines.append(f"Completed review rounds: {item['review_rounds_completed']}/{round_limit or '?'}")
         for field,caption in (('formal_objects','Mathematical objects'),
                               ('assumptions','Assumptions'),
                               ('question','Research question')):
@@ -8248,6 +8282,7 @@ def export_final_question_set(set_id, base_dir=None):
             if value:text_lines.append(caption+': '+value)
         alignment=item.get('topic_alignment')
         if isinstance(alignment,dict):
+            text_lines.append('Topic review: '+item['topic_alignment_status'])
             role_rows=alignment.get('coverage') or []
             covered=[str(rec.get('topic','')) for rec in role_rows
                      if isinstance(rec,dict) and rec.get('present') is True]
@@ -8262,6 +8297,13 @@ def export_final_question_set(set_id, base_dir=None):
             text_lines.append('Topic review: legacy / not assessed')
         text_lines.append(f"Model review: {review['score']}/100 "
                           '(model judgment; not independent validation)')
+        if item['topic_alignment_status'].startswith('Needs improvement'):
+            text_lines.append('Status: Reviewed candidate; NOT topic-validated. '
+                              'See missing subjects and review issue below.')
+        comparison=item.get('revision_comparison')
+        if isinstance(comparison,dict) and comparison.get('accepted') is False:
+            text_lines.append('Revision warning: The revision-difference audit did not confirm '
+                              'this candidate as a safe improvement.')
         critique=str(review.get('comment') or '').strip()
         if critique:
             text_lines.append('Main review issue: '+critique)
@@ -11104,8 +11146,8 @@ class NetworkWindow:
         target_count=state['question_count']
         cycle=max(1,int(cycle));maxround=max(1,int(maxround))
         total=max(0,int(total));done=min(total,max(0,int(done)))
-        names={'judge':' research review ','critic':' Critique recommendation ','revise':' question revision ',
-               'final':' final final review ','select':' most bestVersionselect '}
+        names={'judge':' Mathematical + topic review ','critic':' Critique recommendation ',
+               'revise':' Question revision ','select':' Selecting scored version (no model call) '}
         name=names.get(phase,phase)
         label=f' Current work :{name} {done}/{total}'
         if slot:label+=f'| questions  {slot}/{target_count}'
@@ -11114,31 +11156,31 @@ class NetworkWindow:
         # A cycle is planned as judge / critique / revise.  The exact count
         # changes once model scores are known; use a clearly estimated bar.
         fractions={'judge':(0.0,.55),'critic':(.55,.77),'revise':(.77,.97),
-                   'final':(.97,.99),'select':(.99,.999)}
+                   'select':(1.0,1.0)}
         lower,upper=fractions.get(phase,(0,.0))
         fraction=done/total if total else 1
         if not slot:
             # Legacy stage-only progress (all review stages without a slot).
             # In serial mode the per-slot calculation below is authoritative;
             # never jump to 97% when question 1 of the requested set reaches verification.
-            if phase in ('final','select'):
-                pct=97+(1 if phase=='final' else 2)*fraction
+            if phase=='select':
+                pct=99*fraction
             else:
                 pct=100*((cycle-1)+(lower+(upper-lower)*fraction))/maxround
                 pct=min(97,pct)
             state['review_value'].set(max(float(state['review_value'].get()),min(99,pct)))
         if slot:
             # Overall bar is explicitly estimated from requested MAX rounds;
-            # early stopping may skip some future model calls.
+            # interrupted/retried model calls may temporarily alter the estimate.
             phase_fraction = (cycle - 1 + (lower + (upper - lower) * fraction)) / maxround
-            if phase in ('final', 'select'):
+            if phase=='select':
                 phase_fraction = 1.0
             serial_pct = 100 * ((slot - 1) + min(1.0, phase_fraction)) / target_count
             state['review_value'].set(max(float(state['review_value'].get()),
                                           min(99, serial_pct)))
         state['review_caption'].set(
             f'Review | question {slot or "?"}/{target_count} | round {min(cycle,maxround)}/{maxround} |{name}'
-            +(' (final verification)' if phase in ('final','select') else ''))
+            +(' (selection only)' if phase=='select' else ''))
         state['review_cycle']=cycle
 
     def update_question_window(self,set_id):
@@ -11154,7 +11196,7 @@ class NetworkWindow:
             state['review_value'].set(100)
             state['stage_value'].set(100)
             state['review_caption'].set(f'Review completed: {target_count}/{target_count} questions.')
-            state['stage_caption'].set(f'Final verification: {target_count}/{target_count} questions completed')
+            state['stage_caption'].set(f'All {target_count} questions reviewed; best saved versions selected (no final model review).')
             self.question_model_activity(set_id,False,'Model: Idle| can Export  JSON + TXT')
         elif set_id not in self.iteration_jobs:
             # A resumed set may contain saved evaluations, but the number of
@@ -11370,7 +11412,7 @@ class NetworkWindow:
                   font=('Noto Sans CJK TC',13,'bold')).pack(anchor='w',pady=(0,10))
         ttk.Label(outer,text=' next steps performModelscore , Critique and question revision .',
                   style='Dark.TLabel').pack(anchor='w')
-        ttk.Label(outer,text=' each question mustReviewat most rounds count (1–20)',
+        ttk.Label(outer,text='Review rounds PER question (1–20); each round is saved. No extra final review.',
                   style='Dark.TLabel').pack(anchor='w',pady=(14,4))
         rounds_var=tk.StringVar(value=str(get_question_review_round_limit(set_id)))
         entry=ttk.Spinbox(outer,from_=1,to=20,width=8,textvariable=rounds_var,
@@ -11452,12 +11494,12 @@ class NetworkWindow:
         set_question_pipeline_status(set_id,'reviewing')
         state['review_value'].set(0)
         state['stage_value'].set(0)
-        state['review_caption'].set(f'Review 0/{target_count} questions | up to {maxround} rounds each')
+        state['review_caption'].set(f'Review 0/{target_count} questions | {maxround} rounds each')
         state['stage_caption'].set('Connecting to Ollama: verifying locally installed model...')
         self.question_model_activity(set_id,True,'Model: checking Ollama connection (8s timeout)')
         state['iterate_btn'].configure(state='disabled')
         self.update_question_window(set_id)
-        state['status'].set(f'Sequential review: one question and one model call at a time, up to {maxround} rounds per question. Completed versions are saved.')
+        state['status'].set(f'Sequential review: {maxround} user-selected evaluation rounds per question; no separate final model review.')
         def worker():
             try:
                 # In the former implementation these were THREE sequential /api/tags
@@ -11513,12 +11555,10 @@ class NetworkWindow:
                                     delta,used)
 
                 def review_slot(slot):
-                    # Review rounds are an UPPER BOUND, not a promise that a
-                    # small local model can improve a capped/unverifiable
-                    # question twenty times. Stop when improvement stalls.
-                    best_score = -1
-                    stagnant_rounds = 0
-                    patience = max(2, min(6, int(os.environ.get('BRAIN_REVIEW_PATIENCE', '3'))))
+                    # Run the operator-selected number of independently scored
+                    # candidate versions.  No quality-based early stopping and
+                    # no additional final model review after the requested rounds.
+                    revision_error = None
                     for cycle in range(1, maxround + 1):
                         if stop_event.is_set():
                             raise InterruptedError('Stopped')
@@ -11545,7 +11585,7 @@ class NetworkWindow:
                             topic_record=con.execute('''SELECT rubric_json FROM question_feedback
                                 WHERE candidate_id=? AND role='topic_alignment'
                                 ORDER BY id DESC LIMIT 1''',(cid,)).fetchone()
-                        if prior and topic_record and (previous_question is None or diff is not None):
+                        if prior and topic_record:
                             try:rubric=json.loads(prior[2] or '{}')
                             except (TypeError,ValueError):rubric={}
                             verdict={'score':int(prior[0]),
@@ -11563,26 +11603,10 @@ class NetworkWindow:
                                 prior_review=previous_review)
                             write_verdict(cid,verdict,used)
                         self.events.put(('v7_iteration_update',(set_id,slot,verdict['score'])))
-                        score_now = int(verdict['score'])
-                        # Score ceilings (e.g. missing source evidence) make
-                        # 100 impossible for some questions. Count as progress
-                        # only a higher score or an explicitly accepted revision;
-                        # don't burn 20 expensive cycles on stagnant content.
-                        # A model may repeatedly say that a revision was
-                        # "accepted" without increasing its independently
-                        # scored quality. Such claims cannot reset stagnation.
-                        if score_now > best_score:
-                            best_score = score_now
-                            stagnant_rounds = 0
-                        else:
-                            stagnant_rounds += 1
-                        if score_now >= 100 or version >= maxround:
-                            break
-                        if stagnant_rounds >= patience:
-                            self.events.put(('v7_iteration_progress',
-                                (set_id, f'Question {slot}/{target_count}: stopped early after '
-                                 f'{stagnant_rounds} rounds without a verified improvement '
-                                 f'(score {score_now}); preserving best version.')))
+                        # The selected round count is honored even when a score
+                        # plateaus: the user explicitly asked for repeated review.
+                        # A new draft is created ONLY if another round remains.
+                        if version >= maxround:
                             break
                         self.events.put(('v7_iteration_stage',
                             (set_id,cycle,maxround,'critic',0,1,slot)))
@@ -11615,56 +11639,37 @@ class NetworkWindow:
                                     str(exc)[:900],model='ollama')
                             self.events.put(('v7_iteration_progress', (set_id,
                                 f'Question {slot}/{target_count}: revision failed; '
-                                'retaining previous evaluated question and continuing. '
+                                'saving the reviewed version; remaining rounds require resume. '
                                 +str(exc)[:180])))
-                            break  # safe: current candidate already has an evaluator verdict
+                            revision_error = str(exc)[:280]
+                            break  # retain current evaluated version, but do not claim N rounds completed
                         with database() as con:
                             with con:store_candidate(con,set_id,slot,revised,used)
                         self.events.put(('v7_iteration_update',(set_id,slot,None)))
                     if stop_event.is_set():raise InterruptedError('Stopped')
-                    # A revised candidate must be evaluated even if it was
-                    # produced in the final allowed round.
+                    # No final Ollama call here. Every revision is evaluated
+                    # during its NEXT requested round; the final requested round
+                    # performs an evaluation and does not produce another draft.
                     with database() as con:
-                        current=con.execute('''SELECT id,version,content_json FROM
-                            question_candidates WHERE set_id=? AND slot=? AND current=1''',
-                            (set_id,slot)).fetchone()
-                        already=con.execute('''SELECT 1 FROM question_feedback
-                            WHERE candidate_id=? AND role='evaluator' AND score IS NOT NULL
-                            LIMIT 1''',(current[0],)).fetchone()
-                        prev,prev_review=previous_question_review(
-                            con,set_id,slot,current[1]) if not already else (None,None)
-                    if not already:
-                        self.events.put(('v7_iteration_stage',
-                            (set_id,maxround,maxround,'final',0,1,slot)))
-                        verdict,used=stage(slot,'Final verification',judge_candidates,
-                            judge_question,json.loads(current[2]),context,
-                            prior_question=prev,prior_review=prev_review)
-                        write_verdict(current[0],verdict,used)
-                    # Preserve all candidate versions; select only a version
-                    # with a recorded evaluation and acceptable revision audit.
-                    with database() as con:
-                        best=con.execute('''SELECT q.id,MAX(f.score) AS best_score
-                            FROM question_candidates q JOIN question_feedback f
-                            ON f.candidate_id=q.id
-                            WHERE q.set_id=? AND q.slot=? AND f.role='evaluator'
-                            AND EXISTS (SELECT 1 FROM question_feedback ta
-                                WHERE ta.candidate_id=q.id AND ta.role='topic_alignment'
-                                AND ta.score=1)
-                            AND (q.version=1 OR EXISTS (
-                                SELECT 1 FROM question_feedback d
-                                WHERE d.candidate_id=q.id AND d.role='difference'
-                                AND d.score=1))
-                            GROUP BY q.id ORDER BY best_score DESC,q.version ASC LIMIT 1''',
-                            (set_id,slot)).fetchone()
-                        if not best:
+                        done_rounds=reviewed_question_round_count(con,set_id,slot)
+                        if done_rounds < maxround:
+                            reason=(f'Last revision failed: {revision_error}. '
+                                    if revision_error else '')
                             raise RuntimeError(
-                                f'Question {slot}: no version passes ALL requested topics '
-                                'and substantive mathematical linkage. Saved drafts remain; '
-                                'increase review rounds or start a new question set.')
+                                f'Question {slot}: {done_rounds}/{maxround} review rounds saved. '
+                                +reason+'Resume the remaining rounds; saved versions are intact.')
+                        best=select_best_reviewed_question(con,set_id,slot)
+                        if not best:
+                            raise RuntimeError(f'Question {slot}: no evaluated candidate exists.')
                         with con:
                             con.execute('UPDATE question_candidates SET current=0 '
                                         'WHERE set_id=? AND slot=?',(set_id,slot))
                             con.execute('UPDATE question_candidates SET current=1 WHERE id=?',(best[0],))
+                    # Low scores, missing topics and revision warnings remain in
+                    # SQLite and the exported report; they are NOT re-tested or
+                    # falsely marked as independently validated.
+                    self.events.put(('v7_iteration_stage',
+                        (set_id,maxround,maxround,'select',1,1,slot)))
                     self.events.put(('v7_iteration_update',(set_id,slot,best[1])))
                     return slot
 
@@ -11683,11 +11688,9 @@ class NetworkWindow:
                     try:
                         review_slot(slot)
                         completed.add(slot)
-                        self.events.put(('v7_iteration_stage',
-                            (set_id,maxround,maxround,'final',1,1,slot)))
                         self.events.put(('v7_iteration_progress',
-                            (set_id, f'Question {slot}/{target_count} saved and verified; '
-                             f'completed {len(completed)}/{target_count}.')))
+                            (set_id, f'Question {slot}/{target_count}: selected best already-reviewed '
+                             f'version after {maxround} rounds; completed {len(completed)}/{target_count}.')))
                     except InterruptedError:
                         cancelled = True
                         break
@@ -13050,7 +13053,8 @@ class NetworkWindow:
                         if finished:
                             note=(f' ({revision_errors} failed revision attempts logged; earlier evaluated '
                                   'versions retained.)' if revision_errors else '')
-                            state['status'].set('✓ Review evaluations saved; best accepted recorded versions selected.'+note)
+                            state['status'].set('✓ All requested review rounds completed; '
+                                'best scored versions selected without an additional model review.'+note)
                         else:
                             state['status'].set('✕ Review stopped; saved questions can be resumed: '+error[:300] if error else
                                 f'■ Review incomplete ({reviewed}/{get_question_count(set_id)}); saved state retained.')
