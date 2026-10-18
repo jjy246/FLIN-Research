@@ -1,167 +1,172 @@
 # FLIN — Feature-Link Intellegence Network
 
-**A source-grounded, brain-inspired associative memory system for mathematical research.**
+**A brain-inspired, source-grounded associative memory system for mathematical research.**
 
 [GitHub Repository](https://github.com/jjy246/FLIN-Research)
 
-FLIN is an experimental Python desktop application that learns persistent, directed associations from mathematical literature. Instead of placing papers into a static keyword list, it extracts supported mathematical features, forms triggerable memory units, and strengthens associations when qualified input experiences provide evidence.
+FLIN is an experimental Python desktop application that builds a persistent network of mathematical memory units and directed, weighted associations from research literature. It is designed to investigate how source-grounded experiences can form reusable memories, how association pathways develop, and whether existing mathematical frameworks can help generate new, testable research questions.
 
-The goal is to investigate whether a growing associative memory network can help a machine reuse existing knowledge, connect mathematical frameworks, and propose research questions that can be rigorously tested.
+> **Research status:** FLIN is an experimental research prototype. An association is not a proven mathematical implication. Model-generated questions, scores, and novelty claims require independent mathematical and literature review.
 
-> **Research status:** FLIN is an experimental prototype, not a proof engine or a validated biological model. Learned associations are not mathematical implications, and AI-generated research questions require independent verification.
+## Features at a glance
 
-## Core capabilities
-
-| Component | What it does |
+| Component | Current capability |
 | --- | --- |
-| Literature discovery | Explores mathematical topics and retrieves available academic metadata and source text. |
-| Attention and effective inputs | Extracts source-grounded mathematical terms and ordered input clusters. |
-| SSRS | Processes qualified input clusters and their observed order for associative learning. |
-| Memory formation | Creates persistent, triggerable feature memories from qualified new inputs. |
-| Directed association learning | Adds or reinforces weighted links supported by observed input order. |
-| Pulse simulation | Explores one eligible outgoing edge per pulse using weight-proportional sampling. |
-| Shortcut memories | Experiments with reusable, source-supported patterns under a heuristic cost model. |
-| 3D network exploration | Displays an interactive, sampled topology while retaining the complete graph in SQLite. |
-| Research question workflow | Generates 1–20 questions with local Ollama models and optional iterative reviews. |
-| Network auditing and repair | Diagnoses isolated memories and reprocesses cached sources for missed associations. |
-| Complete network export | Creates verified SQLite snapshots for continuation training and separate graph-analysis files. |
+| Literature acquisition | Discovers mathematical topics and gathers source information using Wikipedia, arXiv, Crossref, local caches, and optional OpenAlex integration. |
+| Attention / input extraction | Identifies source-grounded mathematical features and ordered effective-input clusters without semantic embeddings. |
+| SSRS memory learning | Forms triggerable memories and learns directed associations from qualified input sequences. |
+| Association maintenance | Reinforces existing links; supports auditing and bounded recovery of missed associations from stored sources. |
+| Associative pulse simulation | Routes each pulse along one eligible outgoing edge using normalized connection weights. |
+| Shortcut memory research | Experiments with source-supported reusable patterns under a heuristic association-cost model. |
+| Interactive 3D graph | Provides a desktop topology viewer with node selection, navigation, and bounded rendering for large graphs. |
+| Research question generation | Generates **1–20 questions** for **one or multiple requested topics** using optional local Ollama models. |
+| Iterative model review | Runs **1–20 user-selected review rounds per question**, sequentially, with topic-linkage assessment and saved revisions. |
+| Complete network export | Provides verified SQLite backups for continued training and a separate associative-graph database for analysis. |
+| Hardware-aware operation | Detects available resources and provides adaptive CPU/worker recommendations. |
 
-## How FLIN learns
+## 1. Learning architecture
 
 ```text
-Mathematical topics and research papers
-                |
-                v
-       Source quality checks
-                |
-                v
-  Attention / feature extraction
-                |
-                v
-     Effective Input Clusters
-                |
-                v
-              SSRS
-                |
-                v
-      Triggerable memories
-                |
-                v
-   Directed, weighted associations
-                |
-                +--> Reuse and reinforce existing memories
-                +--> Evaluate optional shortcut patterns
-                |
-                v
-       Persistent SQLite network
-                |
-                +--> Pulse-based associative exploration
-                +--> Interactive 3D topology
-                +--> Source-grounded research questions
+Mathematical topics / papers
+             |
+             v
+  Source and quality checks
+             |
+             v
+  Attention: feature extraction
+             |
+             v
+   Effective input clusters
+             |
+             v
+            SSRS
+             |
+             v
+  Triggerable memory units
+             |
+             v
+ Directed, weighted associations
+             |
+             +----> Reinforce observed associations
+             +----> Evaluate shortcut patterns
+             |
+             v
+     Persistent SQLite memory
+             |
+             +----> Single-path pulse simulation
+             +----> Interactive 3D exploration
+             +----> Research question generation
 ```
 
-### Source-grounded memory formation
+### Memory formation and evidence
 
-A qualified feature can become an active memory unit on its **first valid effective input**. Subsequent independent observations may reinforce the same memory and its connections.
+FLIN can form a triggerable memory unit after its **first qualified effective input**. Later source-grounded observations can reinforce existing memories or their associations rather than creating duplicates.
 
-FLIN preserves source identifiers, supporting passages, and input-cluster records so that associations can be audited.
+The learning pipeline retains source identifiers and effective-input records to support inspection and recovery. Recent extraction improvements address missed mathematical terminology, multi-concept neighboring sentences, and cached papers that did not previously yield useful associative inputs.
 
-Two concepts appearing in the same paper do **not** automatically establish a valid mathematical implication or even a directed association. The directed-learning process uses qualified, ordered input evidence rather than unrestricted co-occurrence.
+**Important distinction:** Ordered, source-observed association does not establish theorem-level causality, logical implication, or equivalence. FLIN does not create an arbitrary mathematical relation merely because two terms appear in the same paper.
 
-### Weighted, single-path associative pulses
+### Directed, weighted pulse routing
 
-For a memory unit with eligible outgoing neighbors \(A_i\), the probability of choosing edge \(i \to j\) is
+For memory unit \(i\), let \(A_i\) be the set of eligible outgoing neighbors at that instant. The probability of selecting \(i\to j\) is
 
 $$
-P(i\to j\mid A_i)=\frac{w_{ij}}{\sum_{k\in A_i}w_{ik}}.
+P(i\to j\mid A_i)=\frac{w_{ij}}{\sum_{k\in A_i}w_{ik}},\qquad j\in A_i.
 $$
 
-Each pulse chooses **one** eligible exit at a time.
-
-The simulator respects immediate-backtracking restrictions and configured revisit limits. It does not split a pulse across every outgoing link or add an independent transmission-success probability.
-
-Computational safety limits are not treated as biological mechanisms.
+A pulse selects **one eligible outgoing connection at a time**; it does not split across multiple edges. The simulator respects immediate-backtracking restrictions and configured revisit limits. No independent link-transmission probability or spontaneous pulse-decay mechanism is added. Safety guards are implementation constraints, not biological hypotheses.
 
 ### Experimental shortcut memories
 
-FLIN can identify repeatedly observed ordered sequences and evaluate whether an additional composite memory could reduce an estimated association cost.
+FLIN can evaluate repeatedly supported ordered patterns for reuse as composite/shortcut memories. The estimated association-cost reduction is an **experimental heuristic**, not evidence that biological learning or actual runtime costs have been optimized.
 
-Shortcut formation requires independent source support and preserves the original memories and links.
+## 2. Mathematical research question generation
 
-The cost model is a research heuristic, **not** a demonstrated reduction in real-world computation time or proof of cognitive efficiency.
+Research question generation is an **optional local Ollama workflow**, separate from the source-driven memory learning rules.
 
-## Mathematical research question generation
+### Choose your question count and research topics
 
-The question-generation workflow is optional and uses **local Ollama models**. It is separate from the rule-based memory-formation process.
+- Generate **1–20 questions per set** (default: 10).
+- Enter **one topic or multiple topics**; the process is not restricted to three fields.
+- For multiple topics, assess whether **each requested topic has a substantive mathematical role** and whether the proposed relationships are meaningful rather than keyword-only.
+- For a single topic, assess genuine relevance and mathematical specificity without inventing artificial cross-disciplinary requirements.
+- Save the chosen question count and review settings in SQLite to support resumption.
 
-- Choose **1–20 questions** per set; the selected count is stored for resuming and export.
-- Specify **one or multiple research topics** (for example, `linear algebra, calculus, finance`).
-- Review each required topic for a substantive mathematical role, not just the presence of a keyword.
-- Assess mathematical objects, assumptions, verifiability, source evidence, mathematical depth, and **topic linkage**.
-- Review questions sequentially with a single active model call, reducing GPU memory contention.
-- Configure up to **20 review rounds** per question, with early stopping when further revision is unproductive.
-- Save intermediate drafts, scores, reviews, and revisions in SQLite.
-- Export concise, reader-friendly TXT questions and structured JSON records.
+For example, a request involving `linear algebra, calculus, finance` should use mathematical objects from all three domains: such as covariance matrices, derivatives or optimization dynamics, and a financial objective. Merely mentioning the words is insufficient.
 
-A question missing a required topic or failing the linkage check is not considered a successfully validated cross-topic candidate.
+### User-controlled iterative review: no extra final model review
 
-**Model scores remain model judgments**, not formal verification, literature novelty checks, or guarantees of mathematical correctness.
+**Each question is processed sequentially to reduce competition for local GPU memory.** The user chooses **1–20 review rounds per question** (default: 3).
 
-### Example output format
+```text
+Question 1: Draft
+    |
+    v
+Review 1 --> Revise --> Review 2 --> Revise --> ... --> Review N
+    |
+    v
+Select the highest-scoring ALREADY REVIEWED version from SQLite
+    |
+    v
+Save result and proceed to Question 2
+```
 
-**Title:** Convergence of Portfolio Optimization
+**There is no extra "final grand review."** A revision is evaluated in the next requested review round; the final requested round evaluates its candidate without creating another unreviewed revision. Thus **N rounds mean N evaluations and at most N−1 between-round revisions**. The program does not stop early just because a score plateaus; if an actual model error interrupts a question, the recorded versions remain available for resumption.
 
-**Topics:** Linear Algebra · Calculus · Finance
+Review criteria include:
 
-**Mathematical objects:** Portfolio weights \(w\), covariance matrix \(\Sigma\), and a differentiable objective \(F(w)\).
+- Mathematical objects and definitions
+- Explicit assumptions and quantifiers
+- Verifiability (proof or counterexample)
+- Available source evidence
+- Mathematical depth
+- **Topic coverage and substantive topic linkage**
 
-**Assumptions:** \(\Sigma\) is positive definite; \(w\) belongs to a specified feasible set.
+The reviewer records numerical scores, specific weaknesses, topic-alignment information, and revision history. Reviews use bounded, structured JSON stages rather than requiring one essay-sized model response.
 
-**Research question:** Under which step-size and constraint conditions does projected gradient descent converge to the portfolio optimum?
+**Selection is not certification.** At the end, FLIN selects the highest-scoring **already evaluated** version from stored records. If that version still lacks required topics or has weak mathematics, the deficiency remains visible in the score and exported report. It is a **reviewed research candidate**, not an independently validated theorem or novel contribution. An unfinished review sequence must not be presented as completed.
 
-**Review summary:** Mathematical quality, topic coverage, linkage score, and the main unresolved issue. Detailed reviews are retained separately.
+### Reader-friendly question exports
 
-*This example illustrates formatting, not a claim of research novelty.*
+Question sets can be exported in concise **TXT** form for reading and structured **JSON** form for further analysis. A human-readable question emphasizes:
 
-## Network visualization and scalability
+1. Title and requested topics
+2. Mathematical objects and essential assumptions
+3. One precise research question or proposition
+4. A short review summary and any unresolved warning
 
-The desktop application provides an interactive **3D topology viewer** using Tkinter and Matplotlib, with NetworkX/NumPy-based layout operations.
+Detailed scoring, versions, and review metadata remain available through the stored records and structured export. Short output must not omit assumptions needed to make a claim mathematically meaningful.
 
-It supports browsing, focusing, selecting memories, and inspecting learned links and source information.
+## 3. Interactive 3D network
 
-For large networks, only a bounded portion is drawn at once to keep the interface responsive.
+FLIN includes a **Tkinter + Matplotlib** desktop viewer for exploring memory units and directed associations. The viewer supports interactive navigation and inspection of selected memories and their outgoing weighted links.
 
-**Visualization limits do not limit the number of memories or links stored in SQLite or included in a full export.**
+The current implementation uses a **topology-based graph layout**; its displayed XYZ positions should **not** be interpreted as empirically measured propagation depth, branching entropy, and feedback-initiation rate. Those three proposed *Association Dynamics Space* coordinates remain a research direction rather than an implemented measurement in this source version.
 
-**Implementation note:** The current source snapshot uses a topology-oriented approximate 3D layout.
+Large networks use bounded rendering (the default overview budget is approximately **2,200 nodes** and **3,500 links**). These are **display limits only**. They do not limit the number of memory units or edges stored in the database or exported in a complete snapshot.
 
-The previously proposed *Association Dynamics Space* with measured propagation-depth, branching-entropy, and feedback-initiation XYZ coordinates is a separate research design and should not be considered implemented in this snapshot.
+## 4. Learning health, recovery, and network growth
 
-## Literature acquisition and recovery
+FLIN distinguishes newly created directed links from additional observations that reinforce existing links. Therefore, a stable **edge count** does not necessarily mean association learning has stopped.
 
-FLIN supports mathematical-topic discovery and research-source acquisition through supported literature services and local caching.
+Recent updates improve recovery for source material that previously formed isolated memories without enough usable ordered links. The recovery process re-examines cached source text in bounded batches and avoids treating the same previously learned input as an entirely new observation.
 
-Available provider integrations include Wikipedia/MediaWiki, arXiv, Crossref, and optional additional academic services.
+Use the read-only association audit to inspect active memory counts, link counts, isolated units, and input-cluster characteristics. Recovery modifies learning state: **back up the database and stop background collection before running it**.
 
-Actual coverage depends on API availability, rate limits, metadata quality, and full-text access.
+Source acquisition can encounter provider quotas, failures, and timeouts. Finishing the **currently discovered** literature frontier does not mean FLIN has learned all available mathematics.
 
-The collection pipeline records discovery and source progress, supports bounded retry/recovery behavior, and distinguishes a temporarily unavailable source from a completed known discovery frontier.
+## 5. Installation
 
-Exhausting the **currently discovered** sources does **not** mean all mathematical knowledge has been learned.
+**Requirements:** Python **3.10+**, Tkinter, a graphical desktop for the GUI, and these Python packages:
 
-Recent association-learning improvements address cases where valid concepts formed memories but ordered links were missed, including multi-concept neighboring sentences and previously cached abstracts.
+- `numpy`
+- `matplotlib`
+- `networkx`
+- `requests`
+- `beautifulsoup4`
+- `scikit-learn`
 
-Recovery is designed to avoid replaying the same learning event as new evidence twice.
-
-## Installation
-
-### Requirements
-
-- Python **3.10+**
-- Tkinter and a graphical desktop for the GUI
-- Core Python packages: `numpy`, `matplotlib`, `networkx`, `requests`, `beautifulsoup4`, `scikit-learn`
-- Optional: `PyMuPDF` for PDF text extraction, `psutil` for richer resource detection
-- Optional: [Ollama](https://ollama.com/) for local research-question generation and review
+**Optional:** `PyMuPDF` for PDF extraction, `psutil` for richer hardware detection, and [Ollama](https://ollama.com/) for generating and reviewing questions locally.
 
 ### Ubuntu / Linux
 
@@ -176,108 +181,111 @@ python flin_desktop.py
 
 ### Windows
 
-Install Python with Tk support and the required Python packages.
-
-Run the repository's Windows launcher if supplied, or start the desktop program directly:
+Install Python with Tk support, then run:
 
 ```powershell
 py -m pip install numpy matplotlib networkx requests beautifulsoup4 scikit-learn
 py flin_desktop.py
 ```
 
-**File naming:** The publicly released entry point is `flin_desktop.py`.
+If your checkout includes `start_windows.bat`, you can use that launcher instead.
 
-The developer's local Ubuntu working copy may be named `questioning.py`; both names refer to the same application when their contents are synchronized.
+**File naming:** The GitHub entry point is `flin_desktop.py`; the developer's Ubuntu working copy is named `questioning.py`. These are the same program when their contents are synchronized.
 
-### Optional local models
+### Optional Ollama setup
 
-Install and start Ollama, then pull a supported local model.
+Install and start Ollama, then download a compatible locally available instruct model. The review stage uses a single selected model to avoid repeated model switching on memory-constrained computers.
 
-A smaller installed model can be requested for reviews through the `BRAIN_REVIEW_MODEL` environment variable.
-
-Model availability, output quality, and speed depend on system memory, GPU VRAM, and the Ollama server configuration.
-
-## Useful CLI commands
-
-Run commands from the repository directory.
-
-Replace `python` with `python3` or `py` as appropriate.
+For example, to request an installed lighter review model:
 
 ```bash
-# Available commands and configuration
+export BRAIN_REVIEW_MODEL=qwen2.5:3b
+python flin_desktop.py
+```
+
+On Windows Command Prompt:
+
+```bat
+set BRAIN_REVIEW_MODEL=qwen2.5:3b
+py flin_desktop.py
+```
+
+The exact model choice and attainable review speed depend on available RAM, GPU memory, and Ollama configuration. Smaller models may be more resource-efficient but can be less reliable at mathematical review.
+
+## 6. Useful command-line commands
+
+Run from the project directory. Substitute `python3` (Linux) or `py` (Windows) for `python` if needed.
+
+```bash
+# Show all available options
 python flin_desktop.py --help
 
-# Current network and hardware information
+# Inspect the active FLIN network and hardware recommendations
 python flin_desktop.py --flin-info
 python flin_desktop.py --cpu-info
 
-# Source acquisition and association health
-python flin_desktop.py --flin-source-report
+# Inspect discovery, sources, and association-learning health
 python flin_desktop.py --flin-discovery-info
+python flin_desktop.py --flin-source-report
 python flin_desktop.py --flin-association-audit
 
-# Recover missed associations from up to 200 cached sources
+# Re-examine up to 200 stored sources for missed associations (modifies the DB)
 python flin_desktop.py --flin-repair-associations 200
 
-# Inspect the experimental shortcut-memory policy
+# Inspect source-supported shortcut-memory decisions
 python flin_desktop.py --flin-efficiency-report
 
-# Run an association simulation
+# Simulate an associative pulse response
 python flin_desktop.py --flin-simulate "eigenvalue"
 
-# List independent networks
+# Manage independent networks
 python flin_desktop.py --list-networks
+python flin_desktop.py --new-network "Mathematics Lab"
 
-# Export a verified complete database and a separate FLIN graph
+# Export and verify a complete network snapshot
 python flin_desktop.py --export-network ./exports --export-format sqlite
-
-# Verify an exported snapshot or its containing directory
 python flin_desktop.py --verify-export ./exports/EXPORT_FOLDER
 ```
 
-`--flin-association-audit` is read-only.
+`EXPORT_FOLDER` is a placeholder for the actual directory generated by the export command. Read-only diagnostics do not replace a backup before repair or import operations.
 
-`--flin-repair-associations` **changes learning state**, so back up the network and stop active collectors before performing a repair.
+## 7. SQLite data and pretrained-network sharing
 
-## Complete SQLite exports and continued training
+FLIN stores its active associative graph primarily in:
 
-Choose **Export Complete Network** in the desktop application, or use the CLI export command above.
+- **`abc_units`** — FLIN memory units and activation status
+- **`abc_edges`** — directed, weighted FLIN associations
+- **`abc_input_clusters`** and related tables — effective input and learning evidence
 
-The verified SQLite export creates a folder containing:
+Legacy `units` / `edges` tables serve a different purpose and should not be mistaken for the complete FLIN associative graph.
+
+### Complete SQLite export
+
+The full SQLite export provides:
 
 | File | Purpose |
 | --- | --- |
-| `association.sqlite3` | **Complete FLIN application snapshot**, including learning state and supporting tables; use this for import and continued training. |
-| `flin_graph.sqlite3` | **Standalone associative graph** with all FLIN units and directed links mapped to convenient `units`/`edges` tables for external analysis. |
-| `FLIN_EXPORT_VERIFICATION.json` | Exact memory/link counts and export-integrity summary. |
+| **`association.sqlite3`** | Full FLIN application snapshot, including training state and supporting tables. **Use this to import and continue training.** |
+| `flin_graph.sqlite3` | Standalone representation of the associative nodes and directed edges for external graph tools. **For analysis, not continuation training.** |
+| `FLIN_EXPORT_VERIFICATION.json` | Export integrity results and source/snapshot graph counts. |
 
-The active FLIN graph is stored in **`abc_units`** and **`abc_edges`**.
+The complete export checks database integrity and FLIN memory/link counts; the 3D display sample is **not** used as the export source. Portable compressed JSONL export is also supported.
 
-Older `units`/`edges` tables serve different legacy research functions. Confusing these sets of tables can make a complete network look incomplete.
+To share a pretrained network, publish a verified `association.sqlite3` and the verification report as GitHub Release assets. Users can import the full snapshot and continue training from its saved state. Before distribution, inspect the archive for private source data or other information not intended for publication.
 
-The full export is made from a consistent SQLite snapshot; display sampling is not applied.
+## 8. Research boundaries and next steps
 
-The standalone graph file is intended for analysis and is **not** a substitute for the complete application snapshot when resuming training.
+FLIN is intended for reproducible experiments in associative learning and mathematical knowledge transfer, not for automatic proof certification.
 
-To share a pretrained network, publish the verified `association.sqlite3` as a GitHub Release asset (together with its verification report and a description of the source data).
+- Learned directed edges encode qualified associative evidence, **not** proven logical or causal relationships.
+- A model's review score is a heuristic judgment, **not** a verified mathematical result.
+- Topic linkage is checked during the selected review rounds; missing topics remain visible rather than being hidden by a final acceptance filter.
+- Actual CPU/GPU throughput depends on model size, API limits, RAM, disk I/O, and SQLite contention; hardware recommendations are estimates, not performance guarantees.
+- Current 3D geometry is primarily a network-layout visualization, not yet an observational XYZ measurement of pulse dynamics.
+- Large-scale accuracy, research novelty, and real-world speedup require external benchmarks and independent replication.
 
-Check the database for private content before sharing.
+**Long-term objective:** Investigate whether a persistent associative memory system can reuse known mathematical structures to formulate and test meaningful relationships across research fields.
 
-Importing a complete snapshot into FLIN allows another researcher to continue from the saved network state.
+---
 
-## Data integrity and research limits
-
-- Persistent memory state is stored in SQLite; independent networks can be created, imported, exported, and switched.
-- Links are **directed associations** formed from qualified input evidence, not verified mathematical implications.
-- A plateau in the number of new links can mean stronger existing links, singleton input clusters, limited new evidence, or an extraction bottleneck. The association audit helps distinguish these cases.
-- Local LLM reviews can be wrong. Human mathematical review and external literature checks remain necessary before calling a question novel or a theorem proved.
-- The 3D display is a sampled view of the network, not an exhaustive rendering or a numerical proof about cognition.
-- Hardware recommendations are adaptive estimates. Actual performance also depends on academic APIs, PDF processing, model size, and SQLite write contention.
-
-## Research direction
-
-FLIN aims to study how a machine can use previously learned mathematical structures to **construct and test new connections between frameworks**.
-
-Next steps include large-scale learning-quality benchmarks, reproducible association experiments, stronger mathematical verification, and analysis of whether network structure predicts useful knowledge transfer.
-
-**FLIN is a research tool for studying associative learning—not a finished model of human intelligence.**
+**FLIN is an experimental platform for researching associative intelligence—not a finished model of human cognition.**
