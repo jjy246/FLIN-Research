@@ -41,7 +41,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -81,7 +81,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intellegence Network | Efficiency-Aware v19.0"
+APP_TITLE = "FLIN — Feature-Link Intellegence Network | SSRS Document Learning v21.0"
 
 
 def _flin_linux_cgroup_resources():
@@ -1496,7 +1496,7 @@ def database(path=None) -> sqlite3.Connection:
 # A full SQLite snapshot is offered separately to preserve *all* app state.
 # ---------------------------------------------------------------------------
 EXPORT_CORE_TABLES = ('units', 'edges', 'positions', 'network_meta',
-                      'abc_units','abc_edges','abc_ssrs','abc_meta',
+                      'abc_units','abc_edges','abc_ssrs','abc_meta','ssrs_fast_roads','ssrs_road_evidence','ssrs_document_reads',
                        'abc_sources','abc_source_topics','abc_topics','abc_positions')
 EXPORT_PROVENANCE_TABLES = (
     'theories', 'papers', 'paper_theories', 'paper_math_applications', 'mentions', 'relation_evidence',
@@ -1508,7 +1508,7 @@ EXPORT_PROVENANCE_TABLES = (
     'abc_sources','abc_source_topics','abc_topics','abc_positions','flin_source_depth',
     'abc_input_clusters','abc_cluster_features','abc_cluster_links','abc_replay_queue',
     'flin_patterns','flin_pattern_evidence','flin_shortcut_members','flin_cost_decisions',
-    'flin_ingest_diagnostics',
+    'flin_ingest_diagnostics','ssrs_road_evidence','ssrs_document_reads',
 )
 
 
@@ -6519,7 +6519,7 @@ from bisect import bisect_left, bisect_right
 ABC_DEFAULTS = {
     'pulse_hz': 18.0, 'input_duration': 2.0, 'edge_dt': 0.0001,
     'frequency_window': 0.25, 'frequency_threshold': 2.0,
-    'max_revisits': 2, 'max_steps': 32, 'quiet_window': 0.40,
+    'max_revisits': 1, 'max_steps': 32, 'quiet_window': 0.40,
     'sample_count': 90, 'learning_rate': 0.22, 'max_weight': 10.0,
 }
 
@@ -6554,6 +6554,22 @@ def abc_schema(con):
         );
         CREATE INDEX IF NOT EXISTS abc_edges_src_weight ON abc_edges(src,weight DESC);
         CREATE INDEX IF NOT EXISTS abc_edges_dst ON abc_edges(dst);
+        CREATE TABLE IF NOT EXISTS ssrs_fast_roads(
+          src TEXT NOT NULL, dst TEXT NOT NULL, support INTEGER NOT NULL,
+          updated TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(src,dst)
+        );
+        CREATE TABLE IF NOT EXISTS ssrs_road_evidence(
+          src TEXT NOT NULL, dst TEXT NOT NULL, cluster_id TEXT NOT NULL,
+          source_id TEXT NOT NULL, observed TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(src,dst,cluster_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssrs_road_evidence_source
+          ON ssrs_road_evidence(source_id,src,dst);
+        CREATE TABLE IF NOT EXISTS ssrs_document_reads(
+          document_id TEXT PRIMARY KEY, filename TEXT NOT NULL,
+          file_sha256 TEXT NOT NULL, content_chars INTEGER NOT NULL,
+          sections INTEGER NOT NULL, updated TEXT DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS abc_ssrs(
           unit_id TEXT PRIMARY KEY,
           priority REAL NOT NULL DEFAULT 0, exposures INTEGER NOT NULL DEFAULT 0
@@ -6979,111 +6995,73 @@ def flin_record_cost_decision(con, event_id, uid, kind, action, old_cost,
          float(new_cost),float(old_cost-new_cost),str(explanation)[:650]))
 
 
-def flin_observe_ssrs_path(con, cluster_id, groups):
-    '''Observe one complete ordered source cluster after the SSRS pass.
+# SSRS is a second, high-speed *transport layer* on the existing directed
+# associative graph. A road must be independently supported by ordered,
+# qualified effective-input events; co-occurrence alone is not a proof.
+# At least two DISTINCT input clusters plus observed repeated activation are
+# required by default. A road never replaces, merges, or adds a memory node.
+SSRS_EVIDENCE_MIN_CLUSTERS = 2
+SSRS_EVIDENCE_MIN_EXPOSURES = 3
+SSRS_EVIDENCE_MIN_WEIGHT = 0.5
 
-    Concurrency groups are not arbitrarily sorted into a fictitious sequence.
-    Only consecutive, unique, active, primitive feature memories qualify.
-    Each independent document counts once per identical member sequence.
+
+def flin_observe_ssrs_path(con, cluster_id, groups):
+    '''Form durable directed high-speed roads from genuine ordered input clusters.
+
+    Called AFTER the normal ABC learning step. Each (cluster, src, dst) can
+    contribute at most once, including on restart/backfill. No pulse routing
+    or associative link weight is changed. Returns newly admitted road count.
     '''
-    if len(groups) < FLIN_SHORTCUT_MIN_MEMBERS:
+    if not groups or len(groups) < 2:
         return 0
-    row=con.execute('SELECT paper_id,quote,url FROM abc_input_clusters WHERE id=?',
-                    (cluster_id,)).fetchone()
-    if not row or not row[0]:
+    row = con.execute('SELECT paper_id FROM abc_input_clusters WHERE id=?',
+                      (str(cluster_id),)).fetchone()
+    if not row:
         return 0
-    paper_id,quote,url=row
-    if any(len(g[1]) != 1 for g in groups):
-        return 0  # Concurrent input is never converted into fake directed order.
-    ordered=[g[1][0] for g in groups]
-    if len(set(ordered))!=len(ordered):
-        return 0  # This prototype does not compress cycles/repeated concepts.
-    # Exclude shortcuts from the source path to prevent shortcuts of shortcuts.
-    for i in ordered:
-        status=con.execute('SELECT status FROM abc_units WHERE id=?',(i,)).fetchone()
-        if not status or status[0]!='active' or i.startswith('flin:shortcut:'):
-            return 0
-    made=0
-    for offset in range(len(ordered)):
-        for length in range(FLIN_SHORTCUT_MIN_MEMBERS,
-                            min(FLIN_SHORTCUT_MAX_MEMBERS,len(ordered)-offset)+1):
-            members=ordered[offset:offset+length]
-            fingerprint='|'.join(members)
-            pid='flin:pattern:'+hashlib.sha256(fingerprint.encode()).hexdigest()[:32]
-            con.execute('INSERT OR IGNORE INTO flin_patterns(id,members_json) VALUES(?,?)',
-                        (pid,json.dumps(members)))
-            cursor=con.execute('''INSERT OR IGNORE INTO flin_pattern_evidence
-                (pattern_id,evidence_source,cluster_id,quote) VALUES(?,?,?,?)''',
-                (pid,str(paper_id),str(cluster_id),str(quote)[:1000]))
-            # Even repeated clusters from the same paper do not increase support.
-            if cursor.rowcount!=1:continue
-            count=con.execute('SELECT COUNT(*) FROM flin_pattern_evidence WHERE pattern_id=?',
-                              (pid,)).fetchone()[0]
-            cost=flin_estimate_association_cost(len(members),count)
-            existing=con.execute('SELECT state FROM flin_patterns WHERE id=?',(pid,)).fetchone()[0]
-            action=('create_shortcut' if count>=FLIN_SHORTCUT_MIN_SOURCES and
-                    cost['net_savings']>FLIN_COST_MIN_NET_BENEFIT else 'reuse_existing')
-            con.execute('''UPDATE flin_patterns SET distinct_sources=?,estimated_uses=?,
-                reconstruction_cost=?,shortcut_cost=?,net_savings=?,updated=CURRENT_TIMESTAMP
-                WHERE id=?''',(count,cost['expected_uses'],cost['reconstruction_cost'],
-                     cost['shortcut_cost'],cost['net_savings'],pid))
-            flin_record_cost_decision(con,cluster_id,pid,'composite',action,
-                 cost['reconstruction_cost'],cost['shortcut_cost'],
-                 'SSRS-observed ordered features; association hop savings estimate, '
-                 'not a theorem or proven equivalence.')
-            if existing=='shortcut':
-                sid='flin:shortcut:'+pid.split(':')[-1]
-                con.execute('UPDATE abc_units SET evidence_count=? WHERE id=?',(count,sid))
-                con.execute('''INSERT OR IGNORE INTO abc_evidence
-                    (unit_id,source_id,explanation,url) VALUES(?,?,?,?)''',
-                    (sid,str(paper_id),str(quote)[:1300],str(url)[:600]))
-                # Reinforce the shortcut only once per new independent source.
-                for a,b in ((members[0],sid),(sid,members[-1])):
-                    old=con.execute('SELECT weight FROM abc_edges WHERE src=? AND dst=?',
-                                    (a,b)).fetchone()
-                    if old:
-                        nw=float(old[0])+.12*(10.-float(old[0]))
-                        con.execute('UPDATE abc_edges SET weight=?,observations=observations+1 '
-                                    'WHERE src=? AND dst=?',(min(10.,nw),a,b))
-                continue
-            if action!='create_shortcut':continue
-            sid='flin:shortcut:'+pid.split(':')[-1]
-            labels=[]
-            for uid in members:
-                label_row=con.execute('SELECT label FROM abc_units WHERE id=?',(uid,)).fetchone()
-                labels.append(label_row[0] if label_row else uid)
-            display='Shortcut: '+' -> '.join(labels)
-            if len(display)>480:display=display[:477]+'...'
-            explanation=('Reusable association pattern backed by '+str(count)+
-                 ' independent documents. Members: '+' -> '.join(labels)+
-                 '. Shortcut is an engineering optimization, not mathematical implication.')
-            con.execute('''INSERT OR IGNORE INTO abc_units
-                (id,label,definition,status,quality,evidence_count)
-                VALUES(?,?,?,'active',85,?)''',(sid,display,explanation,count))
-            con.execute('''INSERT OR IGNORE INTO abc_ssrs(unit_id,priority,exposures)
-                VALUES(?,0,0)''',(sid,))
-            con.executemany('''INSERT OR IGNORE INTO flin_shortcut_members
-                (shortcut_id,member_id,member_order) VALUES(?,?,?)''',
-                [(sid,uid,i) for i,uid in enumerate(members)])
-            # Distinct path shape A -> shortcut -> Z uses two directed hops.
-            # Leave A->B->...->Z unmodified. This is a routing preference,
-            # not a mathematically typed relation or equality assertion.
-            for src,dst in ((members[0],sid),(sid,members[-1])):
-                con.execute('''INSERT OR IGNORE INTO abc_edges
-                    (src,dst,weight,observations) VALUES(?,?,0.6,1)''',(src,dst))
-            con.execute('''UPDATE flin_patterns SET state='shortcut',shortcut_unit_id=?,
-                updated=CURRENT_TIMESTAMP WHERE id=?''',(sid,pid))
-            # Preserve individual source quotations in the existing evidence view.
-            for source,source_quote,source_cluster in con.execute('''
-                SELECT evidence_source,quote,cluster_id FROM flin_pattern_evidence
-                WHERE pattern_id=?''',(pid,)):
-                source_url=con.execute('SELECT url FROM abc_input_clusters WHERE id=?',
-                                       (source_cluster,)).fetchone()
-                con.execute('''INSERT OR IGNORE INTO abc_evidence
-                    (unit_id,source_id,explanation,url) VALUES(?,?,?,?)''',
-                    (sid,str(source),str(source_quote),source_url[0] if source_url else ''))
-            made+=1
-    return made
+    source_id = row[0] or str(cluster_id)
+    proposed = set()
+    for (_, left), (_, right) in zip(groups, groups[1:]):
+        for one in left:
+            a = one['id'] if isinstance(one, dict) else one
+            for other in right:
+                b = other['id'] if isinstance(other, dict) else other
+                if a != b and not a.startswith('flin:shortcut:') and not b.startswith('flin:shortcut:'):
+                    proposed.add((a, b))
+    if not proposed:
+        return 0
+    before = 0
+    for a, b in proposed:
+        edge = con.execute('''SELECT e.weight,e.observations,ss.exposures,dd.exposures
+            FROM abc_edges e
+            JOIN abc_units ua ON ua.id=e.src AND ua.status='active'
+            JOIN abc_units ub ON ub.id=e.dst AND ub.status='active'
+            JOIN abc_ssrs ss ON ss.unit_id=e.src
+            JOIN abc_ssrs dd ON dd.unit_id=e.dst
+            WHERE e.src=? AND e.dst=?''', (a, b)).fetchone()
+        if not edge:
+            continue
+        weight, edge_observations, src_exposures, dst_exposures = edge
+        # Evidence is recorded even before it crosses the formation threshold.
+        con.execute('''INSERT OR IGNORE INTO ssrs_road_evidence
+            (src,dst,cluster_id,source_id) VALUES(?,?,?,?)''',
+            (a, b, str(cluster_id), str(source_id)))
+        if (float(weight) < SSRS_EVIDENCE_MIN_WEIGHT or
+                min(int(src_exposures), int(dst_exposures)) < SSRS_EVIDENCE_MIN_EXPOSURES or
+                int(edge_observations) < SSRS_EVIDENCE_MIN_CLUSTERS):
+            continue
+        support = con.execute('''SELECT COUNT(*) FROM ssrs_road_evidence
+            WHERE src=? AND dst=?''', (a, b)).fetchone()[0]
+        if support < SSRS_EVIDENCE_MIN_CLUSTERS:
+            continue
+        cursor = con.execute('''INSERT OR IGNORE INTO ssrs_fast_roads(src,dst,support)
+                                 VALUES(?,?,?)''', (a, b, support))
+        if cursor.rowcount == 1:
+            before += 1
+        else:
+            con.execute('''UPDATE ssrs_fast_roads SET support=MAX(support,?),
+                           updated=CURRENT_TIMESTAMP WHERE src=? AND dst=?''',
+                        (support, a, b))
+    return before
 
 
 def flin_retrofit_history(con, limit=1000):
@@ -7093,7 +7071,7 @@ def flin_retrofit_history(con, limit=1000):
     are reused. Repeated calls are resumable; existing edges stay unchanged.
     """
     abc_schema(con)
-    previous=con.execute("SELECT value FROM abc_meta WHERE key='flin_cost_retrofit_rowid'").fetchone()
+    previous=con.execute("SELECT value FROM abc_meta WHERE key='flin_ssrs_road_retrofit_rowid_v21'").fetchone()
     after=int(previous[0]) if previous else 0
     rows=con.execute('SELECT rowid,id FROM abc_input_clusters WHERE rowid>? '
                      'ORDER BY rowid LIMIT ?',(after,max(1,min(10000,int(limit))))).fetchall()
@@ -7115,8 +7093,9 @@ def flin_retrofit_history(con, limit=1000):
             shortcuts+=flin_observe_ssrs_path(con,cid,groups)
         if rows:
             con.execute("INSERT OR REPLACE INTO abc_meta(key,value) "
-                        "VALUES('flin_cost_retrofit_rowid',?)",(str(rows[-1][0]),))
-    return {'processed':len(rows),'created_shortcuts':shortcuts,
+                        "VALUES('flin_ssrs_road_retrofit_rowid_v21',?)",(str(rows[-1][0]),))
+    return {'processed':len(rows),'created_fast_roads':shortcuts,
+            'created_shortcuts':0,
             'remaining':con.execute('SELECT COUNT(*) FROM abc_input_clusters WHERE rowid>?',
                                     (rows[-1][0] if rows else after,)).fetchone()[0]}
 
@@ -7626,7 +7605,7 @@ def flin_weighted_exit(con, current, previous, visited, max_revisits, rng, cache
         choices=stored
     chosen=None;total=0.0
     for dst,weight,label in choices:
-        if dst==previous or visited[dst]>=max_revisits:continue
+        if dst==previous or dst in visited or dst.startswith('flin:shortcut:'):continue
         strength=float(weight)
         if not math.isfinite(strength) or strength<=0:continue
         total+=strength
@@ -7635,27 +7614,225 @@ def flin_weighted_exit(con, current, previous, visited, max_revisits, rng, cache
     return chosen
 
 
-def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
-                 frequency_window=.25,frequency_threshold=2.,max_revisits=2,
-                 max_steps=32,quiet_window=.4,sample_count=90,
-                 max_pulses=1400,save=True,random_seed=None):
-    """Finite-event, single-path, minimum-impedance pulse model.
+# SSRS roads are overlays on existing edges, never synthetic memory units.
+# Experimental defaults; speed changes latency, NOT route probabilities.
+SSRS_DEFAULTS = dict(speed_ratio=100., window=.5, min_hits=3,
+                     min_weight=.5, min_transitions=2, scan_interval=.05)
 
-    Continuous supply is separate from SSRS (which routes to memory inputs).
-    A pulse has gate ID, no attenuation and one outgoing destination. Direct
-    backtracking is forbidden; longer cycles permitted with a per-node cap.
-    The reaction is *only* frequency in a sliding time window. Over-threshold
-    time averages are then proportionally normalized (no winner-take-all).
+
+def ssrs_schema(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS ssrs_fast_roads(
+        src TEXT NOT NULL, dst TEXT NOT NULL, support INTEGER NOT NULL,
+        updated TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(src,dst))""")
+
+
+SSRS_EXAMPLE_DOCUMENT = '''Spectral Methods for Covariance-Based Portfolio Optimization
+
+A covariance matrix represents the second moments of correlated asset returns. A covariance matrix is a symmetric positive semidefinite matrix, and its eigenvalue decomposition describes principal directions of financial risk. In portfolio optimization the covariance matrix determines quadratic portfolio variance. Eigenvalue analysis provides information about the conditioning of a covariance matrix and the resulting numerical stability.
+
+Gradient descent minimizes a differentiable quadratic portfolio objective involving a covariance matrix. The gradient of a quadratic form contains matrix-vector products with the covariance matrix. The Hessian of the portfolio objective is related to the covariance matrix, and its eigenvalue spectrum determines step size restrictions for gradient descent. Convex optimization uses this Hessian to determine the curvature of the objective function.
+
+When the covariance matrix is ill-conditioned, gradient descent can converge slowly. Eigenvalue decomposition can reveal this poor conditioning of the covariance matrix. Preconditioning modifies the optimization geometry while retaining the portfolio risk objective. The spectral radius and eigenvalue bounds influence convergence of iterative numerical methods.
+
+A covariance matrix links principal component analysis to portfolio risk. Principal component analysis selects eigenvectors of the covariance matrix, whereas portfolio optimization uses the covariance matrix to penalize correlated asset exposure. A financial risk model may estimate covariance from noisy asset returns, leading to a regularization problem. Regularization modifies eigenvalues of the covariance matrix and can stabilize gradient descent.
+
+The Hessian of a quadratic objective describes local curvature. Eigenvalue bounds on the Hessian control convergence of gradient descent. Portfolio optimization can therefore connect matrix factorization, gradient methods, and mathematical finance through a shared covariance matrix. Covariance estimation, numerical conditioning, and regularization remain important practical limitations.
+
+The covariance matrix defines portfolio optimization through quadratic risk modeling in mathematical finance. When financial risk is represented by a covariance matrix, portfolio optimization minimizes asset return variance. For correlated asset returns, the covariance matrix supplies the risk measure used in portfolio optimization. These repeated mathematical connections reflect an author's explanatory ordering rather than an independent proof.
+
+Gradient descent uses the Hessian to determine a stable step size for portfolio optimization. The Hessian of a twice differentiable objective provides curvature information to gradient descent in the context of convex optimization. By analyzing the Hessian, gradient descent can select conservative steps when minimizing portfolio variance. These choices are connected to the numerical conditioning of a covariance matrix.
+
+Eigenvalue decomposition analyzes the covariance matrix in principal component analysis of asset returns. The eigenvalue decomposition of a covariance matrix identifies dominant directions in principal component analysis. A mathematical risk model may use eigenvalue decomposition of a covariance matrix when comparing correlated market factors. Such repeated descriptions strengthen observed association without proving a causal relationship.
+'''
+
+
+def flin_ssrs_write_example(path):
+    '''Write a transparent synthetic teaching article (not a research citation).'''
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(SSRS_EXAMPLE_DOCUMENT, encoding='utf-8')
+    return path
+
+
+def flin_ssrs_read_text(path):
+    '''Load local textual source with bounded memory; no vector index / RAG required.
+
+    The original page/paragraph wording is evidence. Ollama is intentionally
+    not asked to invent memory links or reorder concepts. PDF needs PyMuPDF.
+    '''
+    path = Path(path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    if path.stat().st_size > 35_000_000:
+        raise ValueError('Document is larger than the 35 MB SSRS reading limit.')
+    kind = path.suffix.casefold()
+    if kind == '.pdf':
+        if fitz is None:
+            raise RuntimeError('PDF requires PyMuPDF: python -m pip install pymupdf')
+        pieces = []
+        with fitz.open(str(path)) as document:
+            if document.needs_pass:
+                raise ValueError('Password-protected PDF is not supported.')
+            for page_no in range(min(120, len(document))):
+                pieces.append(document[page_no].get_text('text', sort=True))
+        content = '\n\n'.join(pieces)
+    elif kind in ('.txt', '.md', '.markdown', '.rst', '.tex', '.csv'):
+        content = path.read_text(encoding='utf-8-sig', errors='replace')
+    elif kind in ('.html', '.htm'):
+        content = BeautifulSoup(path.read_text(encoding='utf-8-sig', errors='replace'),
+                                'html.parser').get_text('\n\n', strip=True)
+    else:
+        raise ValueError('Supported formats: PDF, TXT, Markdown, RST, TeX, CSV, HTML')
+    content = content[:650_000]
+    if len(content.strip()) < 60:
+        raise ValueError('Document does not contain enough extractable text (scanned PDFs require OCR).')
+    return content
+
+
+def flin_ssrs_sections(text, limit=650):
+    '''Divide by observed paragraph boundaries, never synthesize new sequences.'''
+    raw = re.split(r'\n\s*\n+', str(text or ''))
+    out = []
+    for paragraph in raw:
+        paragraph = ' '.join(paragraph.split())
+        if len(paragraph) < 40:
+            continue
+        # A long block of PDF text can be sectioned by genuine sentence ends.
+        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9])', paragraph)
+        section = ''
+        for sentence in sentences:
+            if len(section) + len(sentence) > 2600 and section:
+                out.append(section)
+                section = ''
+            if len(sentence) > 2600:
+                # Do not create a fabricated ordered relationship across chunks.
+                if section:
+                    out.append(section)
+                    section = ''
+                out.extend(sentence[k:k+2600] for k in range(0,len(sentence),2600))
+            else:
+                section += (' ' if section else '') + sentence
+            if len(out) >= limit:
+                break
+        if section:
+            out.append(section)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+def flin_ssrs_report(con, limit=150, *, source_id=None):
+    """Read SSRS overlays; optional source filter shows only article-supported roads.
+
+    Full totals always come from SQLite. Only the visible drawing is capped.
+    """
+    abc_schema(con)
+    evidence_filter = (''' AND EXISTS (SELECT 1 FROM ssrs_road_evidence ev
+                 WHERE ev.src=r.src AND ev.dst=r.dst AND ev.source_id=?) '''
+                       if source_id else '')
+    values = (str(source_id),) if source_id else ()
+    base = """ FROM ssrs_fast_roads r
+        JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
+        JOIN abc_units ua ON ua.id=r.src AND ua.status='active'
+        JOIN abc_units ub ON ub.id=r.dst AND ub.status='active'
+        WHERE 1=1 """ + evidence_filter
+    rows = con.execute('''SELECT r.src,r.dst,r.support,ua.label,ub.label,e.weight ''' + base +
+        ' ORDER BY r.support DESC,e.weight DESC,r.src,r.dst LIMIT ?',
+        values + (max(1,min(3000,int(limit))),)).fetchall()
+    total = con.execute('SELECT COUNT(*) ' + base,values).fetchone()[0]
+    if source_id:
+        observations=con.execute('SELECT COUNT(*) FROM ssrs_road_evidence WHERE source_id=?',
+                                 (str(source_id),)).fetchone()[0]
+    else:
+        observations=con.execute('SELECT COUNT(*) FROM ssrs_road_evidence').fetchone()[0]
+    return {'roads':total, 'evidence_rows':observations,
+            'source_id':source_id, 'speed_ratio_default':SSRS_DEFAULTS['speed_ratio'],
+            'road_sample':[dict(src=a,dst=b,support=n,source=al,target=bl,weight=w)
+                           for a,b,n,al,bl,w in rows]}
+
+
+def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
+    '''Read a real article as qualified, ordered FLIN inputs; create SSRS overlays.
+
+    This reuses the same evidence -> memory -> SSRS -> abc_edges code as online
+    literature. A repeated file cannot double-count the same cluster/road.
+    Progress callback receives read-only, incremental UI snapshots.
+    '''
+    abc_schema(con)
+    if not abc_enabled(con):
+        abc_enable(con)
+    content = flin_ssrs_read_text(path)
+    sections = flin_ssrs_sections(content)
+    if not sections:
+        raise ValueError('No suitable document sections were found.')
+    filename = Path(path).name
+    digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+    doc_id = 'local-doc:' + digest[:32]
+    abc_register_source(con, doc_id, 'local_document', filename,
+                        abstract=content[:20000], topic='user_document')
+    with con:
+        con.execute('''INSERT INTO ssrs_document_reads(document_id,filename,file_sha256,
+            content_chars,sections) VALUES(?,?,?,?,?) ON CONFLICT(document_id)
+            DO UPDATE SET filename=excluded.filename,updated=CURRENT_TIMESTAMP''',
+            (doc_id,filename,digest,len(content),len(sections)))
+    start_roads=flin_ssrs_report(con,limit=1,source_id=doc_id)['roads']
+    units=links=clusters=processed=0
+    for i,section in enumerate(sections):
+        if stop_event is not None and stop_event.is_set():
+            break
+        # Section id is stable. Different sections in the SAME local document
+        # are separate observations; they never masquerade as distinct papers.
+        item = abc_ingest_online_clusters(con, doc_id, filename if i == 0 else '',
+            abstract=section, url='', prepared_clusters=None)
+        clusters += item['clusters']; units += item['promoted']; links += item['edges']
+        processed += 1
+        if progress and (i % 2 == 0 or i == len(sections)-1):
+            snapshot=flin_ssrs_report(con,limit=110,source_id=doc_id)
+            progress({'section':i+1,'total':len(sections),'document':filename,
+                      'new_active_units':units,'link_updates':links,
+                      'input_clusters':clusters,'ssrs':snapshot})
+    report=flin_ssrs_report(con,limit=200,source_id=doc_id)
+    # Show actual feature frequency (exposures per concept within this source),
+    # not a hallucinated article summary or a claim of mathematical proof.
+    important=con.execute('''SELECT u.label,COUNT(DISTINCT f.cluster_id) AS frequency
+        FROM abc_input_clusters c JOIN abc_cluster_features f ON f.cluster_id=c.id
+        JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
+        WHERE c.paper_id=? GROUP BY f.unit_id
+        ORDER BY frequency DESC,u.label LIMIT 35''',(doc_id,)).fetchall()
+    report.update(document=filename,source_id=doc_id,sections_total=len(sections),
+                  sections_processed=processed,
+                  new_units=units,link_updates=links,clusters_added=clusters,
+                  roads_added=report['roads']-start_roads,
+                  cancelled=bool(stop_event is not None and stop_event.is_set()),
+                  key_concepts=[{'label':label,'cluster_frequency':count} for label,count in important],
+                  interpretation=('Key concepts are observed qualified input counts; '
+                                  'a high-speed road is repeated ordered activity on an '
+                                  'EXISTING directed edge, not a proven logical relation.'))
+    return report
+
+
+def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
+                 frequency_window=.25,frequency_threshold=2.,max_revisits=1,
+                 max_steps=32,quiet_window=.4,sample_count=90,
+                 max_pulses=1400,save=True,random_seed=None,ssrs_enabled=True,
+                 ssrs_speed_ratio=100.,ssrs_window=.5,ssrs_min_hits=3,
+                 ssrs_min_weight=.5,ssrs_min_transitions=2,
+                 ssrs_scan_interval=.05):
+    """Chronological single-path events with independent high-speed roads.
+
+    Roads preserve every original node/hop and weight; no group broadcast.
+    Every arrival reacts and emits one tagged feedback record. Feedback here
+    is a logical immediate return (no physical return-tree timing simulation).
+    Supply schedule remains input-duration controlled, as in v19.
     """
     abc_schema(con)
     if random_seed is None:
         random_seed=random.SystemRandom().getrandbits(64)
-    rng=random.Random(random_seed)
     cfg={'routing':'weighted_one_path', 'random_seed':random_seed,
          'pulse_hz':float(pulse_hz),'input_duration':float(input_duration),
          'edge_dt':float(edge_dt),'frequency_window':float(frequency_window),
          'frequency_threshold':float(frequency_threshold),
-         'max_revisits':int(max_revisits),'max_steps':int(max_steps),
+         'max_revisits':1,'max_steps':int(max_steps),
          'quiet_window':float(quiet_window),'sample_count':int(sample_count)}
     if not (0.05<=cfg['pulse_hz']<=10000 and .001<=cfg['input_duration']<=120
             and 1e-8<=cfg['edge_dt']<=.5 and .001<=cfg['frequency_window']<=60
@@ -7663,41 +7840,124 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
             and 1<=cfg['max_steps']<=1024 and .001<=cfg['quiet_window']<=10
             and 4<=cfg['sample_count']<=400):
         raise ValueError(' Pulse exceeds parameter bounds safe simulation range ')
+    ssrs_cfg=dict(enabled=bool(ssrs_enabled), speed_ratio=float(ssrs_speed_ratio),
+        window=float(ssrs_window),min_hits=int(ssrs_min_hits),
+        min_weight=float(ssrs_min_weight),min_transitions=int(ssrs_min_transitions),
+        scan_interval=float(ssrs_scan_interval))
+    if (not all(math.isfinite(v) for v in (ssrs_cfg['speed_ratio'],ssrs_cfg['window'],
+            ssrs_cfg['min_weight'],ssrs_cfg['scan_interval'])) or
+        not 1<=ssrs_cfg['speed_ratio']<=1e6 or not .001<=ssrs_cfg['window']<=60 or
+        not 1<=ssrs_cfg['min_hits']<=100000 or not 0<ssrs_cfg['min_weight']<=1e6 or
+        not 1<=ssrs_cfg['min_transitions']<=100000 or
+        not .001<=ssrs_cfg['scan_interval']<=10):
+        raise ValueError('Invalid SSRS experimental parameters')
+    cfg['ssrs']=ssrs_cfg
     seeds=abc_seed_units(con,query)
+    seeds=[row for row in seeds if not row[0].startswith('flin:shortcut:')]
     if not seeds:
         raise ValueError('FLIN  Network cannot find match Memory unit ; # one imes valid Literature input exactly can Build can trigger Memory unit .')
     n_pulses=max(1,int(cfg['pulse_hz']*cfg['input_duration']))
     if n_pulses>max_pulses:
         raise ValueError(f' exceeds per-run imes simulation safety maximum  {max_pulses}  pulses Pulse , please adjust low Frequency or Time ')
-    events=defaultdict(list); path_examples=[];feedback=[];pulse_records=[]
-    edge_cache={}; labels={uid:label for uid,label,_ in seeds}
-    next_releases=[]
-    # All supply gates are active while their effective input exists. They
-    # receive pulses from the external continuous source, not from SSRS.
+    import heapq
+    events=defaultdict(list);path_examples=[];feedback=[];pulse_records=[]
+    # Each pulse owns a deterministic RNG: acceleration changes event times,
+    # NOT how random draws are interleaved between different pulses.
+    pulse_rngs=[random.Random((int(random_seed) ^
+                 ((j+1)*0x9E3779B97F4A7C15)) & ((1<<128)-1))
+                for j in range(n_pulses)]
+    edge_cache={};labels={uid:label for uid,label,_ in seeds}
+    roads={};new_roads={};fast_traversals=0;normal_traversals=0;saved_time=0.
+    # No write when save=False; old databases need not have overlay tables yet.
+    if ssrs_cfg['enabled'] and con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ssrs_fast_roads'").fetchone():
+        roads={(a,b):int(n) for a,b,n in con.execute("""SELECT r.src,r.dst,r.support
+            FROM ssrs_fast_roads r JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
+            JOIN abc_units a ON a.id=r.src JOIN abc_units b ON b.id=r.dst
+            WHERE a.status='active' AND b.status='active' AND e.weight>=?
+            AND r.src NOT LIKE 'flin:shortcut:%' AND r.dst NOT LIKE 'flin:shortcut:%'
+            """,(ssrs_cfg['min_weight'],))}
+    initial_roads=len(roads)
+    node_recent=defaultdict(deque);edge_recent=defaultdict(deque);edge_weights={}
+    pending=[];serial=0;routes={};next_scan=0.;last_time=0.;truncated=0
+    def push(t,pid,node,previous,visited,depth,gate,via_fast):
+        nonlocal serial
+        serial+=1
+        heapq.heappush(pending,(t,serial,pid,node,previous,visited,depth,gate,via_fast))
     for j in range(n_pulses):
-        gate=j%len(seeds)
-        next_releases.append((j/cfg['pulse_hz'],gate,seeds[gate][0]))
-    last_time=0.
-    for start,gate_index,entry in next_releases:
-        gate='gate:'+seeds[gate_index][2]
-        current=entry;prev=None;visited=defaultdict(int);route=[]
-        for depth in range(cfg['max_steps']):
-            tick=start+depth*cfg['edge_dt']; last_time=max(last_time,tick)
-            events[current].append(tick);pulse_records.append((gate,current,tick))
-            visited[current]+=1;route.append(current)
-            # The input is directly triggerable even on first experience.
-            # Among several learned exits, newly formed weaker routes have
-            # smaller (not zero) probability. Exactly ONE exit conducts.
-            exit_edge=flin_weighted_exit(con,current,prev,visited,
-                cfg['max_revisits'],rng,edge_cache)
-            if exit_edge is None:
-                feedback.append((gate,current,'no_eligible_exit',tick));break
-            dst,w,label=exit_edge
-            labels[dst]=label
-            prev,current=current,dst
+        seed=seeds[j%len(seeds)]
+        # Initial SSRS transport also uses the fast latency; disable for A/B test.
+        delay=cfg['edge_dt']/(ssrs_cfg['speed_ratio'] if ssrs_cfg['enabled'] else 1.)
+        push(j/cfg['pulse_hz']+delay,j,seed[0],None,set(),0,'gate:'+seed[2],False)
+    def form_roads(now):
+        cutoff=now-ssrs_cfg['window']
+        # Sliding deques bound monitoring to recent evidence, not all history.
+        for mapping in (node_recent,edge_recent):
+            for key in list(mapping):
+                q=mapping[key]
+                while q and q[0]<cutoff:q.popleft()
+                if not q:del mapping[key]
+        hot={u for u,q in node_recent.items() if len(q)>=ssrs_cfg['min_hits']}
+        for (src,dst),q in edge_recent.items():
+            if (src,dst) in roads or src not in hot or dst not in hot:continue
+            if len(q)<ssrs_cfg['min_transitions'] or edge_weights[src,dst]<ssrs_cfg['min_weight']:continue
+            roads[src,dst]=len(q);new_roads[src,dst]=len(q)
+    while pending:
+        tick,_,pid,current,prev,visited,depth,gate,via_fast=heapq.heappop(pending)
+        if current in visited:continue
+        last_time=tick;visited.add(current)
+        events[current].append(tick);pulse_records.append((gate,current,tick))
+        feedback.append((gate,current,'activation',tick))
+        if pid<15:routes.setdefault(pid,[]).append(current)
+        # Highway-generated arrivals cannot alone justify highway formation.
+        if not via_fast:node_recent[current].append(tick)
+        if ssrs_cfg['enabled'] and tick>=next_scan:
+            form_roads(tick);next_scan=tick+ssrs_cfg['scan_interval']
+        if depth+1>=cfg['max_steps']:
+            truncated+=1;continue
+        # Shared sampler caches adjacency. Set membership is O(1), no copies:
+        # each pulse has exactly one successor, hence owns its visited set.
+        chosen=flin_weighted_exit(con,current,prev,visited,1,pulse_rngs[pid],edge_cache)
+        if chosen is None:continue
+        dst,w,label=chosen;labels[dst]=label
+        fast=ssrs_cfg['enabled'] and (current,dst) in roads
+        delay=cfg['edge_dt']/(ssrs_cfg['speed_ratio'] if fast else 1.)
+        if fast:
+            fast_traversals+=1;saved_time+=cfg['edge_dt']-delay
         else:
-            feedback.append((gate,route[-1],'max_steps_guard',last_time))
-        if len(path_examples)<15:path_examples.append([labels.get(uid,uid) for uid in route])
+            normal_traversals+=1
+        push(tick+delay,pid,dst,current,visited,depth+1,gate,fast)
+        if not fast:
+            # Store departure evidence only once it has occurred; this measures
+            # actual selected ordinary routes (all queued arrivals are processed).
+            edge_recent[current,dst].append(tick);edge_weights[current,dst]=w
+    path_examples=[[labels.get(u,u) for u in routes[pid]] for pid in sorted(routes)]
+    adjacency=defaultdict(set)
+    for a,b in roads:
+        adjacency[a].add(b);adjacency[b].add(a)
+    remaining=set(adjacency);groups=[]
+    while remaining:
+        root=min(remaining);remaining.remove(root);component=[root];stack=[root]
+        while stack:
+            for neighbor in adjacency[stack.pop()]:
+                if neighbor in remaining:
+                    remaining.remove(neighbor);stack.append(neighbor);component.append(neighbor)
+        groups.append(sorted(component))
+    groups.sort(key=lambda c:(-len(c),c))
+    ssrs_report=dict(enabled=ssrs_cfg['enabled'],initial_roads=initial_roads,
+        new_roads=len(new_roads),total_roads=len(roads),groups=groups,
+        fast_traversals=fast_traversals,normal_traversals=normal_traversals,
+        transport_time_saved_s=saved_time,truncated_pulses=truncated,
+        formation_note=('Roads are retained from ordered learning experiences or recurrent '
+                        'ordinary pulse traffic. A fast hop requires a selected edge '
+                        'already in the road overlay; zero fast hops can be valid.'),
+        road_edges=[list(edge) for edge in sorted(roads)],
+        zero_fast_hop_explanation=(
+            'No selected pulse traversed a fast-road edge. Read repeated ordered text '
+            'or increase pulse coverage; existing roads need not lie on this run.'
+            if not fast_traversals else ''),
+        feedback_model='one logical immediate tagged feedback per activation; input-duration supply',
+        lifecycle='roads persist; current edge validity and weight rechecked each run')
     # Finish only after the last event has left the frequency window AND
     # the external input has stopped; a quiet period alone is not enough.
     finish=max(cfg['input_duration'],last_time+max(cfg['quiet_window'],cfg['frequency_window']))
@@ -7722,8 +7982,9 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
     # Select UI curves, NOT learning / readout nodes. All pulse events are
     # persisted, so the full time-varying reaction can be reconstructed later.
     display_ids=[v['id'] for v in distribution[:48]]
+    display_set=set(display_ids)
     display_ids+= [uid for uid in sorted(raw_mean,key=raw_mean.get,reverse=True)
-                   if uid not in set(display_ids)][:12]
+                   if uid not in display_set][:12]
     frames=[]
     for uid in display_ids:
         arr=events[uid]
@@ -7735,7 +7996,7 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
         frames.append((uid,raw,visible))
     result={'query':query,'settings':cfg,'matched':[{'id':uid,'label':label,'gate':name}
                    for uid,label,name in seeds],
-            'input_pulses':n_pulses,'end_time_s':round(duration,6),
+            'ssrs':ssrs_report,'input_pulses':n_pulses,'end_time_s':round(duration,6),
             'distribution':distribution,'activated_count':len(events),
             'visible_count':len(distribution),'feedback_count':len(feedback),
             'path_examples':path_examples,
@@ -7745,10 +8006,15 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
                                  'raw_hz':raw,'visible_hz':visible}
                                for uid,raw,visible in frames],
             'run_id':None,
-            'notice':' Single-path routing uses weighted sampling by association strength ; Weight represents learned preference , NOT is Mathematics define principle credibility .'
-                     ' long cycles are allowed but with limit imes Revisits ; feedback forward only to Source gate .'}
+            'notice':'SSRS settings are experimental. Groups are connected road components, not merged units. '
+                     'Old shortcut units are retained as history but not routed. '
+                     ' Single-path routing uses weighted sampling by association strength ; Weight represents learned preference , NOT is Mathematics define principle credibility .'
+                     ' No pulse revisits. SSRS roads accelerate existing directed edges without skipping members. Feedback does not yet reduce supply.'}
     if save:
         with con:
+            ssrs_schema(con)
+            con.executemany('INSERT OR IGNORE INTO ssrs_fast_roads(src,dst,support) VALUES(?,?,?)',
+                            [(a,b,n) for (a,b),n in new_roads.items()])
             cur=con.execute('INSERT INTO abc_runs(query,settings_json,result_json) VALUES(?,?,?)',
                             (query,json.dumps(cfg,ensure_ascii=False),json.dumps(result,ensure_ascii=False)))
             run_id=cur.lastrowid;result['run_id']=run_id
@@ -8385,6 +8651,16 @@ class NetworkWindow:
             cell=ttk.Frame(row,style='Side.TFrame');cell.pack(side='left',fill='x',expand=True,padx=2)
             self.label(cell,text,note=True).pack(anchor='w')
             ttk.Entry(cell,textvariable=var,width=7,style='Dark.TEntry').pack(fill='x')
+        self.ssrs_enabled=tk.BooleanVar(value=True)
+        ttk.Checkbutton(box,text='SSRS high-speed roads',variable=self.ssrs_enabled).pack(anchor='w')
+        self.ssrs_speed=tk.DoubleVar(value=100.)
+        self.ssrs_hits=tk.IntVar(value=3)
+        self.ssrs_weight=tk.DoubleVar(value=.5)
+        row=self._row(box)
+        for text,var in [('Speed ratio',self.ssrs_speed),('Min hits / 0.5s',self.ssrs_hits),('Min weight',self.ssrs_weight)]:
+            cell=ttk.Frame(row,style='Side.TFrame');cell.pack(side='left',fill='x',expand=True,padx=2)
+            self.label(cell,text,note=True).pack(anchor='w')
+            ttk.Entry(cell,textvariable=var,width=7,style='Dark.TEntry').pack(fill='x')
         ttk.Button(box,text='Run Pulse Simulation / Response Distribution',
                    command=self.abc_start_simulation,style='Accent.TButton').pack(fill='x',pady=(7,2))
         self.abc_last_run_id=None
@@ -8396,10 +8672,16 @@ class NetworkWindow:
         self.abc_refresh_status()
         ttk.Button(box,text='View Source-Grounded Input Clusters',
                    command=self.abc_show_input_clusters,style='Dark.TButton').pack(fill='x',pady=(5,1))
-        ttk.Button(box,text='Reevaluate Existing Input Costs (1,000 clusters)',
+        ttk.Button(box,text='Rebuild SSRS Roads from Saved Inputs (1,000 clusters)',
                    command=self.flin_ui_retrofit,style='Dark.TButton').pack(fill='x',pady=(5,1))
         ttk.Button(box,text='Shortcut and Cost Report',
                    command=self.flin_ui_cost_report,style='Dark.TButton').pack(fill='x',pady=(2,1))
+        ttk.Button(box,text='Read Document → SSRS Live Roads (TXT/PDF/MD)',
+                   command=self.flin_ssrs_document_window,
+                   style='Accent.TButton').pack(fill='x',pady=(7,2))
+        ttk.Button(box,text='Create Sample Mathematics Article (.txt)',
+                   command=self.flin_ssrs_create_example,
+                   style='Dark.TButton').pack(fill='x',pady=(2,1))
 
         # FLIN's public research output: a broad list of associations from real
         # weighted single-path walks. There is no question generation or LLM UI.
@@ -8658,7 +8940,7 @@ class NetworkWindow:
                 parent=self.root)
             return
         self.abc_worker_active=True
-        self.abc_activity.set('Evaluating association costs for up to 1,000 saved input clusters...')
+        self.abc_activity.set('Replaying up to 1,000 saved qualified inputs into SSRS fast-road evidence...')
         def work():
             try:
                 with database() as con:
@@ -8666,14 +8948,15 @@ class NetworkWindow:
                 self.events.put(('flin_cost_retrofit_done',result))
             except Exception as exc:
                 self.events.put(('abc_worker_error',str(exc)))
-        self._start_background_thread(target=work,name='FLIN_cost_retrofit')
+        self._start_background_thread(target=work,name='FLIN_SSRS_retrofit')
 
     def flin_ui_cost_report(self):
         try:
             with database() as con:
                 report=flin_efficiency_report(con)
+                report['ssrs_fast_roads']=flin_ssrs_report(con,limit=100)
             window=tk.Toplevel(self.root)
-            window.title('FLIN | Association Cost and Shortcut Memories')
+            window.title('FLIN | Association Cost and SSRS Fast Roads')
             window.geometry('850x580')
             display=tk.Text(window,wrap='word',font=('DejaVu Sans Mono',10),
                             bg=self.FIELD,fg=self.FG)
@@ -9009,6 +9292,126 @@ class NetworkWindow:
         win.protocol('WM_DELETE_WINDOW',lambda:(plt.close(fig),win.destroy()))
 
 
+    def flin_ssrs_create_example(self):
+        path=filedialog.asksaveasfilename(parent=self.root,
+            title='Save sample mathematics article',defaultextension='.txt',
+            initialfile='ssrs_mathematics_article.txt',
+            filetypes=[('Text file','*.txt')])
+        if path:
+            try:
+                flin_ssrs_write_example(path)
+                messagebox.showinfo('Example Created',
+                    'Sample article saved. Open it with Read Document → SSRS Live Roads.\n'
+                    'This is synthetic educational text, not a research citation.',parent=self.root)
+            except Exception as exc:
+                messagebox.showerror('Cannot Save Example',str(exc),parent=self.root)
+
+    def flin_ssrs_document_window(self):
+        path=filedialog.askopenfilename(parent=self.root,
+            title='Read a mathematics document into FLIN',
+            filetypes=[('Supported documents','*.txt *.pdf *.md *.markdown *.rst *.tex *.csv *.html *.htm'),
+                       ('All files','*.*')])
+        if not path:return
+        win=tk.Toplevel(self.root)
+        win.title('FLIN | SSRS Live Fast-Road Formation')
+        win.geometry('1140x760');win.configure(bg=self.BG)
+        label=tk.StringVar(value='Preparing actual effective-input processing...')
+        header=ttk.Frame(win,style='Dark.TFrame',padding=8)
+        header.pack(fill='x')
+        self.label(header,'REAL-TIME SSRS | Fast transport overlays on existing directed links').pack(anchor='w')
+        self.label(header,'',textvariable=label,note=True).pack(anchor='w')
+        self.label(header,'Road speed changes arrival latency only; it never changes weighted one-path routing.',
+                   note=True).pack(anchor='w')
+        body=ttk.Panedwindow(win,orient='horizontal')
+        body.pack(fill='both',expand=True,padx=7,pady=7)
+        drawing=ttk.Frame(body,style='Dark.TFrame');panel=ttk.Frame(body,style='Dark.TFrame')
+        body.add(drawing,weight=4);body.add(panel,weight=2)
+        fig=plt.Figure(figsize=(8,6),dpi=95,facecolor='#101925')
+        axis=fig.add_subplot(111)
+        canvas=FigureCanvasTkAgg(fig,master=drawing)
+        canvas.get_tk_widget().pack(fill='both',expand=True)
+        heading=tk.StringVar(value='Fast roads from actual learning: waiting')
+        self.label(panel,'',textvariable=heading,note=True,wraplength=370).pack(anchor='w')
+        table=ttk.Treeview(panel,columns=('src','dst','support','weight'),show='headings')
+        for key,width in (('src',135),('dst',135),('support',65),('weight',70)):
+            table.heading(key,text=key);table.column(key,width=width,anchor='w')
+        table.pack(fill='both',expand=True)
+        self.label(panel,'Most frequently observed article concepts',note=True).pack(anchor='w',pady=(9,2))
+        keybox=tk.Text(panel,height=11,wrap='word',bg=self.FIELD,fg=self.FG,
+                       relief='flat',font=('Arial',10))
+        keybox.pack(fill='both')
+        cancel=threading.Event();updates=queue.Queue();finished=[False];closed=[False]
+        ttk.Button(panel,text='Stop Reading',command=cancel.set).pack(fill='x',pady=8)
+        def worker():
+            try:
+                with database() as con:
+                    output=flin_ssrs_read_document(con,path,
+                        progress=lambda info:updates.put(('step',info)),stop_event=cancel)
+                updates.put(('complete',output))
+            except Exception as exc:
+                updates.put(('error',type(exc).__name__+': '+str(exc)))
+        threading.Thread(target=worker,daemon=True,name='FLIN_ssrs_doc').start()
+        def draw(rows):
+            axis.clear()
+            axis.set_facecolor('#101925')
+            axis.set_title('SSRS roads (sample) | orange directed overlays',color='white')
+            graph=nx.DiGraph()
+            for item in rows[:115]:
+                graph.add_edge(item['source'],item['target'],weight=float(item['weight']),
+                               support=int(item['support']))
+            if graph.number_of_nodes():
+                pos=nx.spring_layout(graph,seed=42,iterations=30)
+                nx.draw_networkx_nodes(graph,pos,ax=axis,node_size=95,node_color='#ffb354')
+                nx.draw_networkx_edges(graph,pos,ax=axis,edge_color='#ffbd69',
+                    arrows=True,arrowsize=11,width=1.3,alpha=.8,node_size=95)
+                labels={n:(n[:27]+'…' if len(n)>27 else n) for n in list(graph)[:25]}
+                nx.draw_networkx_labels(graph,pos,labels=labels,font_color='white',
+                                         font_size=7,ax=axis)
+            else:
+                axis.text(.5,.5,'No established roads yet.\nRoads need repeated ordered input evidence\nand existing active directed links.',
+                          ha='center',va='center',transform=axis.transAxes,color='white')
+            axis.set_axis_off();canvas.draw_idle()
+        def render(ssrs):
+            heading.set(f"SSRS roads: {ssrs['roads']} | evidence observations: {ssrs['evidence_rows']} | "
+                        f"speed ratio: {ssrs['speed_ratio_default']:.0f}×")
+            table.delete(*table.get_children())
+            rows=ssrs['road_sample']
+            for item in rows[:180]:
+                table.insert('', 'end',values=(item['source'][:55],item['target'][:55],
+                                              item['support'],f"{item['weight']:.2f}"))
+            draw(rows)
+        def poll():
+            if closed[0]:return
+            latest=None;result=None;failure=None
+            while True:
+                try:kind,payload=updates.get_nowait()
+                except queue.Empty:break
+                if kind=='step':latest=payload
+                elif kind=='complete':result=payload
+                elif kind=='error':failure=payload
+            if latest:
+                label.set(f"Reading: {latest['document']} | section {latest['section']}/{latest['total']} | "
+                          f"new memories {latest['new_active_units']} | links updated {latest['link_updates']}")
+                render(latest['ssrs'])
+            if result:
+                finished[0]=True
+                label.set(f"{'Stopped' if result['cancelled'] else 'Completed'}: {result['sections_processed']} sections | {result['clusters_added']} "
+                          f"new input clusters | {result['roads_added']} new SSRS roads")
+                render(result)
+                keybox.delete('1.0','end')
+                keybox.insert('1.0','\n'.join(
+                    f"{x['cluster_frequency']:>3}  {x['label']}" for x in result['key_concepts']))
+                self.abc_refresh_status()
+            if failure:
+                finished[0]=True
+                label.set('Read failed: '+failure)
+                messagebox.showerror('SSRS Document Read',failure[:1300],parent=win)
+            if not finished[0]:win.after(250,poll)
+        def close():
+            closed[0]=True;cancel.set();plt.close(fig);win.destroy()
+        win.protocol('WM_DELETE_WINDOW',close)
+        poll()
+
     def abc_start_simulation(self):
         if self.abc_worker_active:
             messagebox.showinfo('Simulation in Progress','Wait for the previous FLIN task.',parent=self.root);return
@@ -9018,6 +9421,9 @@ class NetworkWindow:
         try:
             rate=float(self.abc_rate.get());duration=float(self.abc_duration.get())
             threshold=float(self.abc_threshold.get())
+            ssrs_options=dict(ssrs_enabled=self.ssrs_enabled.get(),
+                ssrs_speed_ratio=float(self.ssrs_speed.get()),
+                ssrs_min_hits=int(self.ssrs_hits.get()),ssrs_min_weight=float(self.ssrs_weight.get()))
         except (ValueError,tk.TclError):
             messagebox.showerror('Invalid Number','Rate, duration, and threshold must be valid numbers.',parent=self.root);return
         self.abc_worker_active=True
@@ -9027,7 +9433,7 @@ class NetworkWindow:
                 with database() as con:
                     if not abc_enabled(con):raise ValueError('FLIN learning has not been enabled for this network.')
                     response=abc_simulate(con,query,pulse_hz=rate,
-                        input_duration=duration,frequency_threshold=threshold)
+                        input_duration=duration,frequency_threshold=threshold,**ssrs_options)
                     associated=abc_save_as_association(con,response)
                 self.events.put(('abc_simulation_done',(response,associated)))
             except Exception as exc:self.events.put(('abc_worker_error',str(exc)))
@@ -9043,6 +9449,10 @@ class NetworkWindow:
         self.label(header,f" continuous Supply  {result['input_pulses']}  pulses | activation  {result['activated_count']}  units |"
                           f" above threshold  {result['visible_count']}  units | feedback  {result['feedback_count']}  items ",
                    note=True).pack(anchor='w')
+        sr=result.get('ssrs',{})
+        self.label(header,f"SSRS: {sr.get('total_roads',0)} roads / {len(sr.get('groups',[]))} groups | "
+            f"fast hops {sr.get('fast_traversals',0)} | saved transport {sr.get('transport_time_saved_s',0):.6f}s",note=True).pack(anchor='w')
+        self.label(header,'Feedback: one event per activation; supply is still duration-controlled. Max-step guard is not natural termination.',note=True).pack(anchor='w')
         content=ttk.Frame(win,style='Dark.TFrame',padding=8);content.pack(fill='both',expand=True)
         table=ttk.Treeview(content,columns=('label','freq','ratio','visits'),show='headings',height=16)
         for key,title,width in [('label','Memory Unit',330),('freq','Time-averaged visible frequency (Hz)',180),
@@ -9080,6 +9490,11 @@ class NetworkWindow:
             links=con.execute('SELECT src,dst,weight FROM abc_edges WHERE src IN ('+
                               ','.join('?'*len(ids))+') AND dst IN ('+
                               ','.join('?'*len(ids))+')',ids+ids).fetchall()
+        if 'ssrs' not in result:
+            with database() as con:
+                roads=con.execute('SELECT src,dst FROM ssrs_fast_roads WHERE src IN ('+
+                    ','.join('?'*len(ids))+') AND dst IN ('+','.join('?'*len(ids))+')',ids+ids).fetchall()
+            result=dict(result,ssrs={'road_edges':roads})
         graph=nx.DiGraph()
         graph.add_nodes_from((uid,{'label':label}) for uid,label in rows)
         graph.add_weighted_edges_from(links)
@@ -9089,10 +9504,13 @@ class NetworkWindow:
         win.geometry('1050x730');win.configure(bg=self.BG)
         fig=plt.figure(figsize=(10,7));axis=fig.add_subplot(111,projection='3d')
         max_signal=max(highlighted.values(),default=1.) or 1.
+        fast_edges={tuple(e) for e in result.get('ssrs',{}).get('road_edges',[])}
         for src,dst,weight in links[:700]:
             a,b=layout[src],layout[dst]
             axis.plot([a[0],b[0]],[a[1],b[1]],[a[2],b[2]],
-                      linewidth=.2+.9*min(1.,weight/10.),alpha=.24)
+                      linewidth=2. if (src,dst) in fast_edges else .2+.9*min(1.,weight/10.),
+                      color='#ffb000' if (src,dst) in fast_edges else '#68a5d8',
+                      alpha=.85 if (src,dst) in fast_edges else .24)
         for uid,label in rows:
             x,y,z=layout[uid]
             strength=highlighted.get(uid,0.)/max_signal
@@ -9100,7 +9518,7 @@ class NetworkWindow:
                          c=[(1.,.35,.17)] if uid in highlighted else [(0.25,.50,.73)])
             if len(rows)<=28 or (strength>.3 and len(highlighted)<=22):
                 axis.text(x,y,z,label[:28],fontsize=7)
-        axis.set_title('FLIN directed learned links · observed reaction emphasized')
+        axis.set_title('SSRS roads: orange | ordinary links: blue | geometry is not distance')
         fig.tight_layout()
         canvas=FigureCanvasTkAgg(fig,master=win);canvas.draw()
         toolbar=NavigationToolbar2Tk(canvas,win,pack_toolbar=False);toolbar.update()
@@ -10493,8 +10911,8 @@ class NetworkWindow:
                     self.append_log('✕  offline Index Failed :'+msg)
                 elif kind == 'flin_cost_retrofit_done':
                     self.abc_worker_active=False
-                    self.abc_activity.set('Cost retrofit finished: '+str(msg))
-                    self.append_log('FLIN cost retrofit: '+str(msg))
+                    self.abc_activity.set('SSRS stored-input road recovery: '+str(msg))
+                    self.append_log('FLIN SSRS road recovery: '+str(msg))
                     self.abc_refresh_status()
                     self.reload_network()
                 elif kind == 'abc_backfill_done':
@@ -12277,13 +12695,21 @@ if __name__ == "__main__":
     parser.add_argument('--abc-duration','--flin-duration',type=float,default=2.,help='Pulse-input duration, in seconds (default: 2)')
     parser.add_argument('--abc-threshold','--flin-threshold',type=float,default=2.,help='Display threshold for response frequency, in Hz (default: 2)')
     parser.add_argument('--abc-window','--flin-window',type=float,default=.25,help='Response-frequency observation window, in seconds (default: 0.25)')
-    parser.add_argument('--abc-revisits','--flin-revisits',type=int,default=2,help='Maximum revisits per memory unit for a single pulse (default: 2)')
+    parser.add_argument('--abc-revisits','--flin-revisits',type=int,default=1,help='Compatibility option: pulse routing now always forbids revisits')
     parser.add_argument('--import-openalex',metavar='WORKS.jsonl[.gz]',
                         help='Import OpenAlex public works JSONL/GZ into the local FTS5 literature catalog')
     parser.add_argument('--import-limit',type=int,default=0,help='Maximum imported records; 0 means unlimited')
     parser.add_argument('--flin-discovery-info',action='store_true',help='Show persistent discovery frontier and progress in SQLite')
     parser.add_argument('--flin-source-report',action='store_true',help='Show source coverage, content depth, and the last stop reason')
+    parser.add_argument('--ssrs-speed-ratio',type=float,default=100.,help='SSRS transport speed / ordinary transport speed')
+    parser.add_argument('--ssrs-min-hits',type=int,default=3,help='Ordinary arrivals per 0.5 s required for road formation')
+    parser.add_argument('--ssrs-min-weight',type=float,default=.5,help='Minimum ordinary edge weight for a high-speed overlay')
+    parser.add_argument('--ssrs-off',action='store_true',help='Disable high-speed roads for a controlled comparison')
     parser.add_argument('--flin-efficiency-report',action='store_true',help='Show association cost decisions and formed shortcut memories')
+    parser.add_argument('--ssrs-read-document',metavar='FILE',
+                        help='Read a TXT/PDF/Markdown/HTML math article, learn inputs and form durable SSRS fast roads')
+    parser.add_argument('--ssrs-report',action='store_true',help='Show real persisted SSRS fast roads and learning evidence')
+    parser.add_argument('--ssrs-example',metavar='TXT',help='Create a synthetic sample mathematical article for SSRS testing')
     parser.add_argument('--flin-related','--flin-bridges',dest='flin_bridges',metavar='CONCEPTS',
         help='Read-only related concepts reached from comma-separated memory inputs')
     parser.add_argument('--bridge-pulses',type=int,default=360,
@@ -12366,6 +12792,20 @@ if __name__ == "__main__":
             print('FLIN related-concepts search failed:',type(exc).__name__,str(exc),file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+    if args.ssrs_example:
+        print('Sample mathematics article:',flin_ssrs_write_example(args.ssrs_example))
+        sys.exit(0)
+    if args.ssrs_report:
+        with database() as con:
+            print(json.dumps(flin_ssrs_report(con),ensure_ascii=False,indent=2))
+        sys.exit(0)
+    if args.ssrs_read_document:
+        with database() as con:
+            info=flin_ssrs_read_document(con,args.ssrs_read_document,
+                progress=lambda snap:print(f"SSRS document {snap['section']}/{snap['total']} | "
+                     f"roads={snap['ssrs']['roads']} | new_units={snap['new_active_units']}",flush=True))
+            print(json.dumps(info,ensure_ascii=False,indent=2))
+        sys.exit(0)
     if args.flin_association_audit:
         with database() as con:
             print(json.dumps(flin_association_health(con),ensure_ascii=False,indent=2))
@@ -12433,11 +12873,16 @@ if __name__ == "__main__":
             if not abc_enabled(con):parser.error(' current network not yet not enabled  FLIN; Please first enable or Build independent network ')
             outcome=abc_simulate(con,args.abc_simulate,pulse_hz=args.abc_pulse_rate,
                 input_duration=args.abc_duration,frequency_threshold=args.abc_threshold,
-                frequency_window=args.abc_window,max_revisits=args.abc_revisits)
+                frequency_window=args.abc_window,max_revisits=args.abc_revisits,
+                ssrs_enabled=not args.ssrs_off,ssrs_speed_ratio=args.ssrs_speed_ratio,
+                ssrs_min_hits=args.ssrs_min_hits,ssrs_min_weight=args.ssrs_min_weight)
             association_id=abc_save_as_association(con,outcome)
             print(json.dumps({'run_id':outcome['run_id'],'association_id':association_id,
                 'activated':outcome['activated_count'],'visible':outcome['visible_count'],
-                'distribution':outcome['distribution'],'feedback_events':outcome['feedback_count']},
+                'distribution':outcome['distribution'],'feedback_events':outcome['feedback_count'],
+                'ssrs':{k:v for k,v in outcome['ssrs'].items() if k in
+                      ('initial_roads','new_roads','total_roads','fast_traversals',
+                       'normal_traversals','transport_time_saved_s','zero_fast_hop_explanation')}},
                 ensure_ascii=False,indent=2))
         sys.exit(0)
     if args.display_check:
