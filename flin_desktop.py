@@ -41,7 +41,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--ssrs-self-test','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -81,7 +81,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intellegence Network | SSRS Document Learning v21.0"
+APP_TITLE = "FLIN — Feature-Link Intelligence Network | SSRS Document Lab v22.0"
 
 
 def _flin_linux_cgroup_resources():
@@ -1508,7 +1508,7 @@ EXPORT_PROVENANCE_TABLES = (
     'abc_sources','abc_source_topics','abc_topics','abc_positions','flin_source_depth',
     'abc_input_clusters','abc_cluster_features','abc_cluster_links','abc_replay_queue',
     'flin_patterns','flin_pattern_evidence','flin_shortcut_members','flin_cost_decisions',
-    'flin_ingest_diagnostics','ssrs_road_evidence','ssrs_document_reads',
+    'flin_ingest_diagnostics','ssrs_road_evidence','ssrs_document_reads','ssrs_document_read_sessions',
 )
 
 
@@ -3248,7 +3248,9 @@ def _pure_math_concept_quality(term):
     if phrase in MATH_ANCHOR_CANONICAL:
         return True,'curated_math_phrase'
     if words[0] in {'prove','proofs','shows','shown','studies','studied','using',
-                    'introduce','novel','different','application','analysis','solve','solving','derive','deriving','present'}:
+                    'introduce','novel','different','application','analysis','solve','solving',
+                    'derive','deriving','present','connect','connecting','compare','comparing',
+                    'uses','use','determines','determining','provides','provide','considering'}:
         return False,'sentence_fragment'
     if any(w in STOP and w not in MATH_CONCEPT_HEADS and w not in MATH_SPECIFIERS for w in words):
         return False,'generic_stopword'
@@ -6570,6 +6572,20 @@ def abc_schema(con):
           file_sha256 TEXT NOT NULL, content_chars INTEGER NOT NULL,
           sections INTEGER NOT NULL, updated TEXT DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS ssrs_document_read_sessions(
+          run_id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
+          filename TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running',
+          sections_total INTEGER NOT NULL DEFAULT 0,
+          sections_processed INTEGER NOT NULL DEFAULT 0,
+          clusters_added INTEGER NOT NULL DEFAULT 0,
+          units_added INTEGER NOT NULL DEFAULT 0,
+          links_updated INTEGER NOT NULL DEFAULT 0,
+          error TEXT NOT NULL DEFAULT '',
+          started TEXT DEFAULT CURRENT_TIMESTAMP,
+          finished TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssrs_document_sessions_doc
+          ON ssrs_document_read_sessions(document_id,started);
         CREATE TABLE IF NOT EXISTS abc_ssrs(
           unit_id TEXT PRIMARY KEY,
           priority REAL NOT NULL DEFAULT 0, exposures INTEGER NOT NULL DEFAULT 0
@@ -6610,6 +6626,8 @@ def abc_schema(con):
           cluster_id TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL,
           PRIMARY KEY(cluster_id,src,dst)
         );
+        CREATE INDEX IF NOT EXISTS idx_abc_cluster_links_pair
+          ON abc_cluster_links(src,dst);
         CREATE TABLE IF NOT EXISTS abc_replay_queue(
           cluster_id TEXT PRIMARY KEY
         );
@@ -6843,7 +6861,7 @@ def _flin_source_sentence_spans(text, minimum=28, maximum=500, cap=260):
     return spans
 
 
-def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *, max_clusters=32):
+def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *, max_clusters=32, event_namespace='', extraction_stats=None):
     """Extract ordered, grounded inputs, prioritizing evidence for REAL links.
 
     A title may create individual memories, but title co-mention does not invent
@@ -6899,7 +6917,13 @@ def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *
                     abc_key(items[0]['label'])).encode('utf-8')).hexdigest()[:24]
             else:
                 fingerprint=hashlib.sha256(abc_key(quote).encode('utf-8')).hexdigest()[:24]
-            cluster_id='online:'+hashlib.sha256((str(paper_id)+'|'+fingerprint).encode('utf-8')).hexdigest()[:32]
+            # Document passages at different positions are distinct effective-input
+            # experiences even when their literal wording is identical. The stable
+            # namespace (section index + sentence ordinal) makes rereads idempotent.
+            # Research-paper extraction keeps its historical IDs unchanged.
+            episode = ('|'+str(event_namespace)+'|'+str(ordinal)) if event_namespace else ''
+            cluster_id='online:'+hashlib.sha256(
+                (str(paper_id)+'|'+fingerprint+episode).encode('utf-8')).hexdigest()[:32]
             # Keep title concepts, then prioritize same-sentence multi-feature
             # input and adjacent abstract boundaries over unrelated singletons.
             priority=(0 if title_input else
@@ -6942,12 +6966,17 @@ def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *
                 global_index+=1
 
     result=[];seen=set()
+    if extraction_stats is not None:
+        extraction_stats['distinct_candidates'] = len({row[2] for row in candidates})
     for _priority,_order,cid,quote,features in sorted(candidates,key=lambda x:(x[0],x[1])):
         if cid in seen:continue
         seen.add(cid)
         result.append({'id':cid,'paper_id':str(paper_id),
                        'quote':quote,'url':str(url or ''),'features':features})
         if len(result)>=cap:break
+    if extraction_stats is not None:
+        extraction_stats['omitted_due_to_cluster_cap'] = max(
+            0, extraction_stats['distinct_candidates']-len(result))
     return result
 
 
@@ -7118,15 +7147,23 @@ def flin_efficiency_report(con):
                              for a,b,c,d in shortcuts]}
 
 
-def abc_reconcile_pending(con, limit=100, *, eta=.22, max_weight=10.):
+def abc_reconcile_pending(con, limit=100, *, eta=.22, max_weight=10., source_filter=None):
     """Learn links from stored clusters after later evidence activates concepts.
 
     Input-event contribution is idempotent. A cluster is never counted twice,
     even if later sources promote more of its candidate features.
     """
     abc_schema(con)
-    todo=[r[0] for r in con.execute('SELECT cluster_id FROM abc_replay_queue '
-                                    'ORDER BY rowid LIMIT ?', (max(1,int(limit)),))]
+    if source_filter is None:
+        todo=[r[0] for r in con.execute('SELECT cluster_id FROM abc_replay_queue '
+                                        'ORDER BY rowid LIMIT ?', (max(1,int(limit)),))]
+    else:
+        # Old global replay backlog must not prevent this file's own evidence
+        # from being reconciled before its live report is shown.
+        todo=[r[0] for r in con.execute('''SELECT q.cluster_id
+            FROM abc_replay_queue q JOIN abc_input_clusters c ON c.id=q.cluster_id
+            WHERE c.paper_id=? ORDER BY q.rowid LIMIT ?''',
+            (str(source_filter), max(1,int(limit))))]
     made=0; new_links=0; reinforcements=0
     with con:
         for cid in todo:
@@ -7306,25 +7343,32 @@ def flin_association_health(con):
 
 
 def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', url='',
-                               *, prepared_clusters=None):
+                               *, prepared_clusters=None, document_event_namespace=''):
+
     """Web/arXiv/Crossref -> grounded clusters -> SSRS -> FLIN memory graph."""
     if not abc_enabled(con):return {'clusters':0,'promoted':0,'edges':0,'extracted':0}
+    extraction_stats={}
     clusters=(prepared_clusters if prepared_clusters is not None else
-              abc_extract_input_clusters(paper_id,title,abstract,fulltext,url))
+              abc_extract_input_clusters(paper_id,title,abstract,fulltext,url,
+                  max_clusters=96 if document_event_namespace else 32,
+                  event_namespace=document_event_namespace,
+                  extraction_stats=extraction_stats))
     done=promoted=edges=0
     for item in clusters:
         res=abc_ingest_cluster(con,item['features'],item['id'],
-                        defer_replay=True, evidence_source_id=(str(paper_id) if str(paper_id).startswith('wiki:') else 'paper:'+str(paper_id)),
+                        defer_replay=True, evidence_source_id=(str(paper_id) if str(paper_id).startswith(('wiki:','local-doc:')) else 'paper:'+str(paper_id)),
                         gate_label='online_mathematical_input',
                         cluster_quote=item['quote'],paper_id=paper_id,
                         cluster_url=item.get('url') or url)
         if not res.get('duplicate'):
             done+=1;promoted+=res['promoted'];edges+=res['edges']
     # One bounded reconcile per paper, not one SQLite graph pass per sentence.
-    replay=abc_reconcile_pending(con,limit=400)
+    replay=abc_reconcile_pending(con,limit=600 if document_event_namespace else 400,
+        source_filter=str(paper_id) if document_event_namespace else None)
     edges+=replay['edges']
     return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters),
-            'new_links':replay['new_links'], 'reinforcements':replay['reinforcements']}
+            'new_links':replay['new_links'], 'reinforcements':replay['reinforcements'],
+            'omitted_due_to_cluster_cap':extraction_stats.get('omitted_due_to_cluster_cap',0)}
 
 
 def abc_ingest_cluster(con, features, source_id, gate_label='source', *, eta=.22,
@@ -7654,67 +7698,113 @@ def flin_ssrs_write_example(path):
     return path
 
 
-def flin_ssrs_read_text(path):
-    '''Load local textual source with bounded memory; no vector index / RAG required.
+def flin_ssrs_read_text(path, *, progress=None, stop_event=None, with_metadata=False):
+    """Read local mathematics text with explicit provenance/limits and cancellation.
 
-    The original page/paragraph wording is evidence. Ollama is intentionally
-    not asked to invent memory links or reorder concepts. PDF needs PyMuPDF.
-    '''
+    PDF text order and mathematical glyph decoding depend on the source PDF.
+    This routine does NOT OCR scans, infer formula meaning or fabricate passages.
+    """
     path = Path(path).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
-    if path.stat().st_size > 35_000_000:
-        raise ValueError('Document is larger than the 35 MB SSRS reading limit.')
+    file_bytes = path.stat().st_size
+    if file_bytes > 35_000_000:
+        raise ValueError('Document exceeds the 35 MB local reading limit.')
     kind = path.suffix.casefold()
+    warnings = []
+    meta = {'filename': path.name, 'file_bytes': file_bytes,
+            'format': kind, 'pages_read': 0, 'pages_total': 0,
+            'text_truncated': False, 'warnings': warnings}
+
+    def check_stop():
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError('Document reading stopped before ingestion.')
+
+    check_stop()
     if kind == '.pdf':
         if fitz is None:
-            raise RuntimeError('PDF requires PyMuPDF: python -m pip install pymupdf')
+            raise RuntimeError('PDF reading needs PyMuPDF: python -m pip install pymupdf')
         pieces = []
         with fitz.open(str(path)) as document:
             if document.needs_pass:
-                raise ValueError('Password-protected PDF is not supported.')
-            for page_no in range(min(120, len(document))):
-                pieces.append(document[page_no].get_text('text', sort=True))
+                raise ValueError('This PDF is password protected.')
+            meta['pages_total'] = len(document)
+            page_cap = min(120, len(document))
+            if len(document) > page_cap:
+                warnings.append(f'Only the first {page_cap}/{len(document)} PDF pages are inspected; the remaining pages are NOT learned.')
+            for page_no in range(page_cap):
+                check_stop()
+                try:
+                    text = document[page_no].get_text('text', sort=True)
+                except (RuntimeError, ValueError) as exc:
+                    warnings.append(f'PDF page {page_no+1} extraction failed ({type(exc).__name__}).')
+                    text = ''
+                # Preserve page boundaries for evidence and avoid joining formula
+                # lines blindly into a false mathematical statement.
+                pieces.append(text)
+                meta['pages_read'] += 1
+                if progress and (page_no == 0 or (page_no + 1) % 5 == 0 or page_no + 1 == page_cap):
+                    progress({'phase': 'extract', 'page': page_no+1,
+                              'pages': len(document), 'document': path.name})
         content = '\n\n'.join(pieces)
+        if sum(len(p.strip()) > 40 for p in pieces) < max(1, page_cap // 4):
+            warnings.append('Very few pages contain readable text; this may be a scanned PDF requiring OCR.')
+        warnings.append('PDF formulas/columns may not extract in correct reading order; inspect source evidence before interpreting links.')
     elif kind in ('.txt', '.md', '.markdown', '.rst', '.tex', '.csv'):
         content = path.read_text(encoding='utf-8-sig', errors='replace')
+        if kind == '.tex':
+            warnings.append('LaTeX commands are retained as original evidence; formulas are not parsed into mathematical semantics.')
+        if kind == '.csv':
+            warnings.append('CSV is treated as prose, not as a mathematical data table.')
     elif kind in ('.html', '.htm'):
-        content = BeautifulSoup(path.read_text(encoding='utf-8-sig', errors='replace'),
-                                'html.parser').get_text('\n\n', strip=True)
+        raw = path.read_text(encoding='utf-8-sig', errors='replace')
+        soup = BeautifulSoup(raw, 'html.parser')
+        for element in soup(['script','style','nav','footer']):
+            element.decompose()
+        content = soup.get_text('\n\n', strip=True)
     else:
-        raise ValueError('Supported formats: PDF, TXT, Markdown, RST, TeX, CSV, HTML')
-    content = content[:650_000]
+        raise ValueError('Supported formats: PDF, TXT, Markdown, RST, TeX, CSV and HTML.')
+    check_stop()
+    if '\ufffd' in content:
+        warnings.append('Some characters could not be decoded accurately (replacement character U+FFFD present).')
+    if len(content) > 650_000:
+        warnings.append(f'Text was truncated from {len(content):,} to 650,000 characters. Unread tail was NOT learned.')
+        meta['text_truncated'] = True
+        content = content[:650_000]
     if len(content.strip()) < 60:
-        raise ValueError('Document does not contain enough extractable text (scanned PDFs require OCR).')
-    return content
+        raise ValueError('Not enough extractable text. Scanned PDFs require OCR or a text-based version.')
+    meta['content_chars'] = len(content)
+    return (content, meta) if with_metadata else content
 
 
 def flin_ssrs_sections(text, limit=650):
-    '''Divide by observed paragraph boundaries, never synthesize new sequences.'''
+    """Bound real-source chunks without crossing paragraph/page boundaries."""
     raw = re.split(r'\n\s*\n+', str(text or ''))
     out = []
+    # Extended sentence ends support lowercase mathematical prose and CJK.
+    boundary = re.compile(r'(?<=[.!?。！？])\s+(?=[A-Za-z0-9(\\∂∇α-ωΑ-Ω])')
     for paragraph in raw:
         paragraph = ' '.join(paragraph.split())
         if len(paragraph) < 40:
             continue
-        # A long block of PDF text can be sectioned by genuine sentence ends.
-        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9])', paragraph)
+        sentences = boundary.split(paragraph)
         section = ''
         for sentence in sentences:
             if len(section) + len(sentence) > 2600 and section:
                 out.append(section)
                 section = ''
             if len(sentence) > 2600:
-                # Do not create a fabricated ordered relationship across chunks.
                 if section:
                     out.append(section)
                     section = ''
+                # A long unsplittable PDF block is a fallback; adjacency across
+                # these hard boundaries must not be interpreted as evidence.
                 out.extend(sentence[k:k+2600] for k in range(0,len(sentence),2600))
             else:
                 section += (' ' if section else '') + sentence
             if len(out) >= limit:
                 break
-        if section:
+        if section and len(out) < limit:
             out.append(section)
         if len(out) >= limit:
             break
@@ -7722,9 +7812,10 @@ def flin_ssrs_sections(text, limit=650):
 
 
 def flin_ssrs_report(con, limit=150, *, source_id=None):
-    """Read SSRS overlays; optional source filter shows only article-supported roads.
+    """Show both fast roads AND unpromoted, source-observed directed links.
 
-    Full totals always come from SQLite. Only the visible drawing is capped.
+    Observations count unique source-position input clusters, not citations or
+    mathematical proofs. A single article may supply multiple observations.
     """
     abc_schema(con)
     evidence_filter = (''' AND EXISTS (SELECT 1 FROM ssrs_road_evidence ev
@@ -7736,79 +7827,258 @@ def flin_ssrs_report(con, limit=150, *, source_id=None):
         JOIN abc_units ua ON ua.id=r.src AND ua.status='active'
         JOIN abc_units ub ON ub.id=r.dst AND ub.status='active'
         WHERE 1=1 """ + evidence_filter
-    rows = con.execute('''SELECT r.src,r.dst,r.support,ua.label,ub.label,e.weight ''' + base +
+    max_items = max(1, min(3000, int(limit)))
+    roads = con.execute('''SELECT r.src,r.dst,r.support,ua.label,ub.label,e.weight '''+base+
         ' ORDER BY r.support DESC,e.weight DESC,r.src,r.dst LIMIT ?',
-        values + (max(1,min(3000,int(limit))),)).fetchall()
-    total = con.execute('SELECT COUNT(*) ' + base,values).fetchone()[0]
+        values+(max_items,)).fetchall()
+    total = con.execute('SELECT COUNT(*) '+base, values).fetchone()[0]
     if source_id:
-        observations=con.execute('SELECT COUNT(*) FROM ssrs_road_evidence WHERE source_id=?',
-                                 (str(source_id),)).fetchone()[0]
+        observations = con.execute('SELECT COUNT(*) FROM ssrs_road_evidence WHERE source_id=?',
+                                   (str(source_id),)).fetchone()[0]
     else:
-        observations=con.execute('SELECT COUNT(*) FROM ssrs_road_evidence').fetchone()[0]
-    return {'roads':total, 'evidence_rows':observations,
-            'source_id':source_id, 'speed_ratio_default':SSRS_DEFAULTS['speed_ratio'],
-            'road_sample':[dict(src=a,dst=b,support=n,source=al,target=bl,weight=w)
-                           for a,b,n,al,bl,w in rows]}
+        observations = con.execute('SELECT COUNT(*) FROM ssrs_road_evidence').fetchone()[0]
+    result = {'roads': total, 'evidence_rows': observations,
+              'source_id': source_id, 'speed_ratio_default': SSRS_DEFAULTS['speed_ratio'],
+              'road_sample': [dict(src=a,dst=b,support=n,source=al,target=bl,weight=w)
+                              for a,b,n,al,bl,w in roads],
+              'candidate_links': 0, 'candidate_sample': [],
+              'document_clusters_total': 0, 'document_memories_total': 0,
+              'document_links_total': 0}
+    if not source_id:
+        return result
+    source_id = str(source_id)
+    result['document_clusters_total'] = int(con.execute(
+        'SELECT COUNT(*) FROM abc_input_clusters WHERE paper_id=?', (source_id,)).fetchone()[0])
+    result['document_memories_total'] = int(con.execute('''SELECT COUNT(DISTINCT f.unit_id)
+        FROM abc_cluster_features f JOIN abc_input_clusters c ON c.id=f.cluster_id
+        JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
+        WHERE c.paper_id=?''', (source_id,)).fetchone()[0])
+    summary_sql = '''SELECT cl.src,cl.dst,COUNT(*) AS visits
+        FROM abc_cluster_links cl JOIN abc_input_clusters c ON c.id=cl.cluster_id
+        WHERE c.paper_id=? GROUP BY cl.src,cl.dst'''
+    result['document_links_total'] = int(con.execute(
+        'SELECT COUNT(*) FROM ('+summary_sql+')', (source_id,)).fetchone()[0])
+    result['candidate_links'] = result['document_links_total'] - int(con.execute(
+        '''SELECT COUNT(*) FROM ('''+summary_sql+''') x
+           JOIN ssrs_fast_roads r ON r.src=x.src AND r.dst=x.dst''',
+        (source_id,)).fetchone()[0])
+    candidates = con.execute('''SELECT observed.src,observed.dst,observed.visits,
+        ua.label,ub.label,e.weight,e.observations,
+        COALESCE(sa.exposures,0),COALESCE(sb.exposures,0),
+        CASE WHEN r.src IS NULL THEN 0 ELSE 1 END
+        FROM ('''+summary_sql+''') observed
+        JOIN abc_edges e ON e.src=observed.src AND e.dst=observed.dst
+        JOIN abc_units ua ON ua.id=e.src AND ua.status='active'
+        JOIN abc_units ub ON ub.id=e.dst AND ub.status='active'
+        LEFT JOIN abc_ssrs sa ON sa.unit_id=e.src
+        LEFT JOIN abc_ssrs sb ON sb.unit_id=e.dst
+        LEFT JOIN ssrs_fast_roads r ON r.src=e.src AND r.dst=e.dst
+        ORDER BY (r.src IS NOT NULL) DESC, observed.visits DESC,
+                 e.weight DESC,ua.label,ub.label LIMIT ?''',
+        (source_id, max_items)).fetchall()
+    examined = []
+    for a,b,n,al,bl,w,edge_n,ex_a,ex_b,fast in candidates:
+        reasons=[]
+        if n<SSRS_EVIDENCE_MIN_CLUSTERS:
+            reasons.append(f'observed {n}/{SSRS_EVIDENCE_MIN_CLUSTERS} ordered inputs')
+        if min(ex_a,ex_b)<SSRS_EVIDENCE_MIN_EXPOSURES:
+            reasons.append(f'unit exposures {min(ex_a,ex_b)}/{SSRS_EVIDENCE_MIN_EXPOSURES}')
+        if w<SSRS_EVIDENCE_MIN_WEIGHT:
+            reasons.append(f'weight {w:.2f}/{SSRS_EVIDENCE_MIN_WEIGHT}')
+        if edge_n<SSRS_EVIDENCE_MIN_CLUSTERS:
+            reasons.append(f'edge observations {edge_n}/{SSRS_EVIDENCE_MIN_CLUSTERS}')
+        quote = con.execute('''SELECT substr(c.quote,1,900)
+           FROM abc_input_clusters c JOIN abc_cluster_links cl ON cl.cluster_id=c.id
+           WHERE c.paper_id=? AND cl.src=? AND cl.dst=?
+           ORDER BY c.rowid LIMIT 1''', (source_id,a,b)).fetchone()
+        examined.append({'src':a,'dst':b,'source':al,'target':bl,
+             'support':int(n),'weight':round(float(w),4),
+             'edge_observations':int(edge_n),
+             'source_exposures':int(ex_a),'target_exposures':int(ex_b),
+             'fast_road':bool(fast),'state': 'FAST' if fast else 'LEARNING',
+             'next_requirement':('已達到 SSRS 建路門檻' if fast else
+                                  '; '.join(reasons) if reasons else 'await road reconciliation'),
+             'quote':quote[0] if quote else ''})
+    result['candidate_sample']=examined
+    return result
 
 
 def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
-    '''Read a real article as qualified, ordered FLIN inputs; create SSRS overlays.
+    """Learn local mathematics from original ordered passages; safely resumable.
 
-    This reuses the same evidence -> memory -> SSRS -> abc_edges code as online
-    literature. A repeated file cannot double-count the same cluster/road.
-    Progress callback receives read-only, incremental UI snapshots.
-    '''
+    Start/stop is cooperative. Every accepted input event commits atomically;
+    a resumed identical file is not strengthened twice at the same location.
+    """
     abc_schema(con)
     if not abc_enabled(con):
         abc_enable(con)
-    content = flin_ssrs_read_text(path)
+    content, extraction = flin_ssrs_read_text(
+        path, progress=progress, stop_event=stop_event, with_metadata=True)
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError('Stopped before processing; no document data was inserted.')
     sections = flin_ssrs_sections(content)
     if not sections:
-        raise ValueError('No suitable document sections were found.')
+        raise ValueError('Document contains no suitable prose sections.')
+    warnings = list(extraction['warnings'])
+    if len(sections) >= 650:
+        warnings.append('The 650-section safety ceiling was reached. Unread sections may remain.')
     filename = Path(path).name
     digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
+    # Keep prior text-derived document IDs stable to avoid duplicate learning
+    # when upgrading an existing v21 installation.
     doc_id = 'local-doc:' + digest[:32]
-    abc_register_source(con, doc_id, 'local_document', filename,
-                        abstract=content[:20000], topic='user_document')
+    run_id = 'read:' + uuid.uuid4().hex
+    file_hash = hashlib.sha256()
+    with Path(path).expanduser().open('rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024), b''):
+            file_hash.update(chunk)
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError('Stopped before processing; no document data was inserted.')
+    abc_register_source(con,doc_id,'local_document',filename,
+                        abstract=content[:20000],topic='user_document')
     with con:
         con.execute('''INSERT INTO ssrs_document_reads(document_id,filename,file_sha256,
-            content_chars,sections) VALUES(?,?,?,?,?) ON CONFLICT(document_id)
-            DO UPDATE SET filename=excluded.filename,updated=CURRENT_TIMESTAMP''',
-            (doc_id,filename,digest,len(content),len(sections)))
+          content_chars,sections) VALUES(?,?,?,?,?) ON CONFLICT(document_id)
+          DO UPDATE SET filename=excluded.filename,file_sha256=excluded.file_sha256,
+          content_chars=excluded.content_chars,sections=excluded.sections,
+          updated=CURRENT_TIMESTAMP''',
+          (doc_id,filename,file_hash.hexdigest(),len(content),len(sections)))
+        con.execute('''INSERT INTO ssrs_document_read_sessions
+          (run_id,document_id,filename,sections_total)
+          VALUES(?,?,?,?)''',(run_id,doc_id,filename,len(sections)))
     start_roads=flin_ssrs_report(con,limit=1,source_id=doc_id)['roads']
-    units=links=clusters=processed=0
-    for i,section in enumerate(sections):
-        if stop_event is not None and stop_event.is_set():
-            break
-        # Section id is stable. Different sections in the SAME local document
-        # are separate observations; they never masquerade as distinct papers.
-        item = abc_ingest_online_clusters(con, doc_id, filename if i == 0 else '',
-            abstract=section, url='', prepared_clusters=None)
-        clusters += item['clusters']; units += item['promoted']; links += item['edges']
-        processed += 1
-        if progress and (i % 2 == 0 or i == len(sections)-1):
-            snapshot=flin_ssrs_report(con,limit=110,source_id=doc_id)
-            progress({'section':i+1,'total':len(sections),'document':filename,
-                      'new_active_units':units,'link_updates':links,
-                      'input_clusters':clusters,'ssrs':snapshot})
+    units=links=clusters=processed=attempted=empty_sections=cap_omissions=0
+    last_update=0.0
+    status='running'
+    error=''
+    try:
+        for i,section in enumerate(sections):
+            if stop_event is not None and stop_event.is_set():
+                status='stopped'
+                break
+            # The stable section and per-sentence ordinal distinguish legitimate
+            # repeated observations while remaining idempotent across rereads.
+            item=abc_ingest_online_clusters(con,doc_id,filename if i==0 else '',
+                abstract=section,url='',prepared_clusters=None,
+                document_event_namespace=f'section:{i:06d}')
+            attempted+=item['extracted']
+            empty_sections+=int(item['extracted']==0)
+            cap_omissions+=item.get('omitted_due_to_cluster_cap',0)
+            clusters+=item['clusters'];units+=item['promoted'];links+=item['edges']
+            processed+=1
+            now=time.monotonic()
+            if progress and (i==0 or i+1==len(sections) or i%3==0 or now-last_update>0.6):
+                snapshot=flin_ssrs_report(con,limit=80,source_id=doc_id)
+                progress({'phase':'learn','section':i+1,'total':len(sections),
+                  'document':filename,'new_active_units':units,
+                  'link_updates':links,'input_clusters':clusters,
+                  'skipped_duplicates':attempted-clusters,'ssrs':snapshot})
+                last_update=now
+            if (i+1)%8==0:
+                with con:
+                    con.execute('''UPDATE ssrs_document_read_sessions SET
+                      sections_processed=?,clusters_added=?,units_added=?,links_updated=?
+                      WHERE run_id=?''',(processed,clusters,units,links,run_id))
+        if status=='running':
+            status='complete'
+    except BaseException as exc:
+        status='failed'
+        error=f'{type(exc).__name__}: {exc}'[:700]
+        raise
+    finally:
+        with con:
+            con.execute('''UPDATE ssrs_document_read_sessions SET
+              status=?,sections_processed=?,clusters_added=?,units_added=?,
+              links_updated=?,error=?,finished=CURRENT_TIMESTAMP WHERE run_id=?''',
+              (status,processed,clusters,units,links,error,run_id))
+    if empty_sections:
+        warnings.append(f'{empty_sections}/{processed} processed sections had no qualifying mathematical input clusters.')
+    if cap_omissions:
+        warnings.append(f'{cap_omissions} valid-looking input events exceeded the per-section extraction budget and were NOT ingested.')
     report=flin_ssrs_report(con,limit=200,source_id=doc_id)
-    # Show actual feature frequency (exposures per concept within this source),
-    # not a hallucinated article summary or a claim of mathematical proof.
     important=con.execute('''SELECT u.label,COUNT(DISTINCT f.cluster_id) AS frequency
         FROM abc_input_clusters c JOIN abc_cluster_features f ON f.cluster_id=c.id
         JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
         WHERE c.paper_id=? GROUP BY f.unit_id
-        ORDER BY frequency DESC,u.label LIMIT 35''',(doc_id,)).fetchall()
-    report.update(document=filename,source_id=doc_id,sections_total=len(sections),
-                  sections_processed=processed,
-                  new_units=units,link_updates=links,clusters_added=clusters,
-                  roads_added=report['roads']-start_roads,
-                  cancelled=bool(stop_event is not None and stop_event.is_set()),
-                  key_concepts=[{'label':label,'cluster_frequency':count} for label,count in important],
-                  interpretation=('Key concepts are observed qualified input counts; '
-                                  'a high-speed road is repeated ordered activity on an '
-                                  'EXISTING directed edge, not a proven logical relation.'))
+        ORDER BY frequency DESC,u.label LIMIT 45''',(doc_id,)).fetchall()
+    report.update(document=filename,source_id=doc_id,session_id=run_id,
+        sections_total=len(sections),sections_processed=processed,
+        new_units=units,link_updates=links,clusters_added=clusters,
+        observations_extracted=attempted,
+        empty_sections=empty_sections,
+        omitted_due_to_cluster_cap=cap_omissions,
+        duplicates_skipped=attempted-clusters,
+        roads_added=max(0,report['roads']-start_roads),
+        cancelled=(status=='stopped'),status=status,
+        key_concepts=[{'label':label,'cluster_frequency':count} for label,count in important],
+        extraction=extraction,warnings=warnings,
+        interpretation=('Concept frequency = count of source-position effective-input events. '
+          'A directed link records order in extracted text, not implication. '
+          'FAST is a high-speed overlay on an existing learned directed link; '
+          'it is not a theorem or a second memory node. Existing readings are reusable.'))
     return report
+
+
+def flin_ssrs_self_test():
+    """Fully offline regression check in a temporary database; never touch live data."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='flin_document_test_') as folder:
+        root=Path(folder)
+        sample=flin_ssrs_write_example(root/'math_document.txt')
+        with contextlib.closing(database(path=root/'test.sqlite3')) as con:
+            original=flin_ssrs_read_document(con,sample)
+            assert original['roads']>=1, 'Sample should form at least one SSRS road.'
+            assert original['candidate_links']>=1, 'Unpromoted links must be visible.'
+            assert original['document_clusters_total']>0
+            assert original['sections_processed']==original['sections_total']
+            assert original['candidate_sample'][0].get('quote')
+            repeated=flin_ssrs_read_document(con,sample)
+            assert repeated['clusters_added']==0 and repeated['roads_added']==0
+            assert repeated['link_updates']==0
+            assert con.execute('SELECT COUNT(*) FROM ssrs_document_read_sessions').fetchone()[0]==2
+            # Repeated identical passages in different positions count as
+            # distinct events, whereas a second reading of the same positions does not.
+            sentence=('A covariance matrix represents mathematical risk, and '
+                      'eigenvalue decomposition analyzes the covariance matrix.')
+            duplicate_source=root/'repeated_passages.txt'
+            duplicate_source.write_text('\n\n'.join([sentence]*4),encoding='utf-8')
+            multiple=flin_ssrs_read_document(con,duplicate_source)
+            assert multiple['document_clusters_total']>=4, 'Repeated source positions lost.'
+            repeat_again=flin_ssrs_read_document(con,duplicate_source)
+            assert repeat_again['clusters_added']==0
+            # Stop after a known committed section; resume should not double learn.
+            alternate=root/'partially_read.txt'
+            alternate.write_text(SSRS_EXAMPLE_DOCUMENT+'\n\n'+SSRS_EXAMPLE_DOCUMENT,
+                                 encoding='utf-8')
+            stop=threading.Event()
+            def stop_after_first(progress):
+                if progress.get('phase')=='learn' and progress.get('section',0)>=1:
+                    stop.set()
+            partial=flin_ssrs_read_document(con,alternate,stop_event=stop,
+                                            progress=stop_after_first)
+            assert partial['cancelled'] and partial['sections_processed']>=1
+            finished=flin_ssrs_read_document(con,alternate)
+            assert not finished['cancelled']
+            assert finished['sections_processed']==finished['sections_total']
+            pdf_info=None
+            if fitz is not None:
+                pdf=root/'text_based.pdf'
+                doc=fitz.open()
+                page=doc.new_page()
+                page.insert_text((60,80),SSRS_EXAMPLE_DOCUMENT[:700],fontsize=9)
+                doc.save(str(pdf));doc.close()
+                text,meta=flin_ssrs_read_text(pdf,with_metadata=True)
+                assert meta['pages_read']==1 and len(text.strip())>=60
+                pdf_info={'pages_read':meta['pages_read'],'extracted_chars':len(text)}
+            return {'ok':True,'offline':True,'original':{
+                 'memories':original['document_memories_total'],
+                 'directed_links':original['document_links_total'],
+                 'fast_roads':original['roads'],
+                 'candidates':original['candidate_links']},
+                 'idempotent_second_read':repeated['clusters_added']==0,
+                 'repeat_position_events':multiple['document_clusters_total'],
+                 'partial_stop_and_resume':True,'pdf':pdf_info,
+                 'database':'temporary, deleted after testing'}
 
 
 def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
@@ -8362,6 +8632,7 @@ class NetworkWindow:
         # Tk images/variables must not outlive the Tcl interpreter while any
         # worker still holds references to this window.
         self._background_threads = set()
+        self._ssrs_document_stops = set()
         self._closing = False
         self._shutdown_job = None
         self._shutdown_started = None
@@ -9307,110 +9578,431 @@ class NetworkWindow:
                 messagebox.showerror('Cannot Save Example',str(exc),parent=self.root)
 
     def flin_ssrs_document_window(self):
-        path=filedialog.askopenfilename(parent=self.root,
-            title='Read a mathematics document into FLIN',
-            filetypes=[('Supported documents','*.txt *.pdf *.md *.markdown *.rst *.tex *.csv *.html *.htm'),
-                       ('All files','*.*')])
-        if not path:return
+        """Document Lab: explicit start/stop and inspectable SSRS evidence."""
+        existing=getattr(self,'_flin_document_window',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
         win=tk.Toplevel(self.root)
-        win.title('FLIN | SSRS Live Fast-Road Formation')
-        win.geometry('1140x760');win.configure(bg=self.BG)
-        label=tk.StringVar(value='Preparing actual effective-input processing...')
-        header=ttk.Frame(win,style='Dark.TFrame',padding=8)
-        header.pack(fill='x')
-        self.label(header,'REAL-TIME SSRS | Fast transport overlays on existing directed links').pack(anchor='w')
-        self.label(header,'',textvariable=label,note=True).pack(anchor='w')
-        self.label(header,'Road speed changes arrival latency only; it never changes weighted one-path routing.',
-                   note=True).pack(anchor='w')
-        body=ttk.Panedwindow(win,orient='horizontal')
-        body.pack(fill='both',expand=True,padx=7,pady=7)
-        drawing=ttk.Frame(body,style='Dark.TFrame');panel=ttk.Frame(body,style='Dark.TFrame')
-        body.add(drawing,weight=4);body.add(panel,weight=2)
-        fig=plt.Figure(figsize=(8,6),dpi=95,facecolor='#101925')
+        self._flin_document_window=win
+        win.title('FLIN | 數學文件讀取與 SSRS 建路實驗室')
+        win.geometry('1380x850')
+        win.minsize(980,650)
+        win.configure(bg=self.BG)
+        file_var=tk.StringVar(value='')
+        phase_var=tk.StringVar(value='尚未開始：請選擇數學文件，再按「開始讀取」。')
+        metrics_var=tk.StringVar(value='輸入叢集 — | 記憶元 — | 文件連結 — | 快速道路 —')
+        help_var=tk.StringVar(value='橘色＝已成立 SSRS 高速傳遞；藍灰色＝已觀測到的普通單向連結。圖中座標僅供觀察。')
+        current={'report':None,'cancel':None,'active':False,'closed':False,
+                 'last_graph_key':None,'db_path':None}
+        events=queue.Queue()
+
+        controls=ttk.Frame(win,style='Dark.TFrame',padding=(12,10))
+        controls.pack(side='top',fill='x')
+        self.label(controls,'數學文件學習 | Document Learning Lab').pack(anchor='w')
+        selector=ttk.Frame(controls,style='Dark.TFrame')
+        selector.pack(fill='x',pady=(7,4))
+        path_input=ttk.Entry(selector,textvariable=file_var,style='Dark.TEntry')
+        path_input.pack(side='left',fill='x',expand=True,padx=(0,7))
+
+        def choose_file():
+            if current['active']:
+                return
+            p=filedialog.askopenfilename(parent=win,title='選擇數學文件',
+                filetypes=[('Mathematical text/PDF','*.txt *.pdf *.md *.markdown *.rst *.tex *.csv *.html *.htm'),
+                           ('All Files','*.*')])
+            if p:
+                file_var.set(p)
+                try:
+                    size=Path(p).stat().st_size
+                    phase_var.set(f'已選擇 {Path(p).name} ({size/1024:.1f} KiB)。按「開始讀取」才會學習。')
+                except OSError:
+                    phase_var.set('已選擇文件。按「開始讀取」才會學習。')
+
+        choose_btn=ttk.Button(selector,text='選擇文件',command=choose_file,style='Dark.TButton')
+        choose_btn.pack(side='left',padx=(0,8))
+        start_btn=ttk.Button(selector,text='▶ 開始讀取',style='Accent.TButton')
+        start_btn.pack(side='left',padx=(0,7))
+        stop_btn=ttk.Button(selector,text='■ 結束讀取',state='disabled',style='Dark.TButton')
+        stop_btn.pack(side='left',padx=(0,7))
+        save_btn=ttk.Button(selector,text='匯出分析 JSON',state='disabled',style='Dark.TButton')
+        save_btn.pack(side='left')
+        simulation_row=ttk.Frame(controls,style='Dark.TFrame')
+        simulation_row.pack(fill='x',pady=(4,0))
+        simulate_btn=ttk.Button(simulation_row,text='▶ 測試核心概念的 SSRS 快速傳播',
+                                state='disabled',style='Dark.TButton')
+        simulate_btn.pack(side='left',padx=(0,9))
+        self.label(simulation_row,
+                   '完成讀取後，可在「文章核心概念」頁選取概念並測試；模擬只讀取網路，不額外學習。',
+                   note=True).pack(side='left',anchor='w')
+        progressbar=ttk.Progressbar(controls,mode='determinate',maximum=100)
+        progressbar.pack(fill='x',pady=(6,5))
+        self.label(controls,'',textvariable=phase_var,note=True,wraplength=1250).pack(anchor='w')
+        self.label(controls,'',textvariable=metrics_var,note=True).pack(anchor='w',pady=(4,0))
+        self.label(controls,'',textvariable=help_var,note=True,wraplength=1250).pack(anchor='w')
+
+        split=ttk.Panedwindow(win,orient='horizontal')
+        split.pack(fill='both',expand=True,padx=8,pady=(3,9))
+        graph_frame=ttk.Frame(split,style='Dark.TFrame')
+        inspector=ttk.Frame(split,style='Dark.TFrame')
+        split.add(graph_frame,weight=3)
+        split.add(inspector,weight=3)
+        fig=plt.Figure(figsize=(7.5,6.5),dpi=95,facecolor=self.PANEL)
         axis=fig.add_subplot(111)
-        canvas=FigureCanvasTkAgg(fig,master=drawing)
+        canvas=FigureCanvasTkAgg(fig,master=graph_frame)
         canvas.get_tk_widget().pack(fill='both',expand=True)
-        heading=tk.StringVar(value='Fast roads from actual learning: waiting')
-        self.label(panel,'',textvariable=heading,note=True,wraplength=370).pack(anchor='w')
-        table=ttk.Treeview(panel,columns=('src','dst','support','weight'),show='headings')
-        for key,width in (('src',135),('dst',135),('support',65),('weight',70)):
-            table.heading(key,text=key);table.column(key,width=width,anchor='w')
-        table.pack(fill='both',expand=True)
-        self.label(panel,'Most frequently observed article concepts',note=True).pack(anchor='w',pady=(9,2))
-        keybox=tk.Text(panel,height=11,wrap='word',bg=self.FIELD,fg=self.FG,
-                       relief='flat',font=('Arial',10))
-        keybox.pack(fill='both')
-        cancel=threading.Event();updates=queue.Queue();finished=[False];closed=[False]
-        ttk.Button(panel,text='Stop Reading',command=cancel.set).pack(fill='x',pady=8)
-        def worker():
-            try:
-                with database() as con:
-                    output=flin_ssrs_read_document(con,path,
-                        progress=lambda info:updates.put(('step',info)),stop_event=cancel)
-                updates.put(('complete',output))
-            except Exception as exc:
-                updates.put(('error',type(exc).__name__+': '+str(exc)))
-        threading.Thread(target=worker,daemon=True,name='FLIN_ssrs_doc').start()
-        def draw(rows):
+        tabs=ttk.Notebook(inspector)
+        tabs.pack(fill='both',expand=True)
+        tab_links=ttk.Frame(tabs,style='Dark.TFrame')
+        tab_concepts=ttk.Frame(tabs,style='Dark.TFrame')
+        tab_log=ttk.Frame(tabs,style='Dark.TFrame')
+        tabs.add(tab_links,text='單向連結 / SSRS')
+        tabs.add(tab_concepts,text='文章核心概念')
+        tabs.add(tab_log,text='讀取紀錄')
+        self.label(tab_links,'選取任一連結可檢查原文與門檻；FAST 不代表數學上的因果或證明。',
+                   note=True,wraplength=530).pack(anchor='w',padx=7,pady=7)
+        link_columns=('source','target','support','weight','status')
+        link_table=ttk.Treeview(tab_links,columns=link_columns,show='headings',height=12)
+        headers={'source':('來源記憶元',185),'target':('目標記憶元',185),
+                 'support':('次數',55),'weight':('權重',70),'status':('狀態',90)}
+        for key,(text,width) in headers.items():
+            link_table.heading(key,text=text)
+            link_table.column(key,width=width,minwidth=46,anchor='w')
+        link_scroll=ttk.Scrollbar(tab_links,orient='vertical',command=link_table.yview)
+        link_table.configure(yscrollcommand=link_scroll.set)
+        link_scroll.pack(side='right',fill='y')
+        link_table.pack(fill='both',expand=True,padx=(8,0))
+        link_table.tag_configure('fast',foreground='#e7a156')
+        link_table.tag_configure('learning',foreground='#9ac5e8')
+        self.label(tab_links,'所選連結的真實來源與建立條件',note=True).pack(anchor='w',padx=9,pady=(8,3))
+        evidence=tk.Text(tab_links,height=11,wrap='word',bg=self.FIELD,fg=self.FG,
+                         insertbackground=self.FG,relief='flat',font=('Arial',10),padx=9,pady=8)
+        evidence.pack(fill='both',expand=True,padx=8,pady=(0,8))
+        evidence.insert('1.0','尚無來源資料。')
+        evidence.configure(state='disabled')
+        concept_table=ttk.Treeview(tab_concepts,columns=('rank','label','frequency'),
+                                   show='headings',height=19)
+        for key,title,width in (('rank','#',50),('label','概念記憶元',325),
+                                ('frequency','有效輸入次數',140)):
+            concept_table.heading(key,text=title)
+            concept_table.column(key,width=width,anchor='w')
+        concept_table.pack(fill='both',expand=True,padx=8,pady=8)
+        self.label(tab_concepts,'次數為不同來源位置的有效輸入叢集數，並非重要性的客觀分數。',
+                   note=True,wraplength=520).pack(anchor='w',padx=10,pady=(0,8))
+        logbox=tk.Text(tab_log,wrap='word',bg=self.FIELD,fg=self.FG,
+                       insertbackground=self.FG,relief='flat',font=('Arial',10),padx=10,pady=10)
+        logbox.pack(fill='both',expand=True,padx=8,pady=8)
+        logbox.insert('end','流程：選擇文件 → 開始 → 擷取文字 → 分段有效輸入 → 記憶元/單向連結 → SSRS 高速道路。\n')
+        logbox.configure(state='disabled')
+        evidence_by_row={}
+        last_log_stage={'text':''}
+
+        def write_log(text):
+            if current['closed']:
+                return
+            logbox.configure(state='normal')
+            logbox.insert('end',time.strftime('%H:%M:%S')+'  '+str(text)+'\n')
+            logbox.see('end')
+            logbox.configure(state='disabled')
+
+        def show_evidence(*_):
+            selection=link_table.selection()
+            if not selection:
+                return
+            item=evidence_by_row.get(selection[0])
+            if not item:
+                return
+            detail=(f"{item['source']}  →  {item['target']}\n"
+                    f"狀態：{'FAST 已成高速路' if item['fast_road'] else 'LEARNING 尚在形成'}\n"
+                    f"本文獨立位置的輸入次數：{item['support']}\n"
+                    f"聯想連結權重：{item['weight']:.3f}；原有連結觀測：{item['edge_observations']}\n"
+                    f"前後記憶元各自曝光：{item['source_exposures']} / {item['target_exposures']}\n"
+                    f"尚缺條件：{item['next_requirement'] if not item['fast_road'] else '無，已達標'}\n\n"
+                    f"原文證據（非數學證明）：\n{item.get('quote') or '無可顯示的來源文字'}")
+            evidence.configure(state='normal')
+            evidence.delete('1.0','end')
+            evidence.insert('1.0',detail)
+            evidence.configure(state='disabled')
+        link_table.bind('<<TreeviewSelect>>',show_evidence)
+
+        def draw_graph(candidates):
+            # Overview is a bounded projection, never the graph's full size.
+            visible=candidates[:75]
+            signature=tuple((r['src'],r['dst'],r['fast_road'],r['support']) for r in visible)
+            if signature==current['last_graph_key']:
+                return
+            current['last_graph_key']=signature
             axis.clear()
-            axis.set_facecolor('#101925')
-            axis.set_title('SSRS roads (sample) | orange directed overlays',color='white')
+            axis.set_facecolor(self.PANEL)
+            axis.set_title('Document-observed directed links | FAST in orange',
+                           color='white',fontsize=10)
             graph=nx.DiGraph()
-            for item in rows[:115]:
-                graph.add_edge(item['source'],item['target'],weight=float(item['weight']),
-                               support=int(item['support']))
-            if graph.number_of_nodes():
-                pos=nx.spring_layout(graph,seed=42,iterations=30)
-                nx.draw_networkx_nodes(graph,pos,ax=axis,node_size=95,node_color='#ffb354')
-                nx.draw_networkx_edges(graph,pos,ax=axis,edge_color='#ffbd69',
-                    arrows=True,arrowsize=11,width=1.3,alpha=.8,node_size=95)
-                labels={n:(n[:27]+'…' if len(n)>27 else n) for n in list(graph)[:25]}
-                nx.draw_networkx_labels(graph,pos,labels=labels,font_color='white',
-                                         font_size=7,ax=axis)
+            for item in visible:
+                graph.add_edge(item['source'],item['target'],fast=item['fast_road'],
+                               support=item['support'])
+            if graph.number_of_nodes()==0:
+                axis.text(.5,.5,'尚未建立可辨識的單向連結。\n\n選擇文件並按「開始讀取」',
+                          transform=axis.transAxes,ha='center',va='center',color='#e2e8f0')
             else:
-                axis.text(.5,.5,'No established roads yet.\nRoads need repeated ordered input evidence\nand existing active directed links.',
-                          ha='center',va='center',transform=axis.transAxes,color='white')
-            axis.set_axis_off();canvas.draw_idle()
-        def render(ssrs):
-            heading.set(f"SSRS roads: {ssrs['roads']} | evidence observations: {ssrs['evidence_rows']} | "
-                        f"speed ratio: {ssrs['speed_ratio_default']:.0f}×")
-            table.delete(*table.get_children())
-            rows=ssrs['road_sample']
-            for item in rows[:180]:
-                table.insert('', 'end',values=(item['source'][:55],item['target'][:55],
-                                              item['support'],f"{item['weight']:.2f}"))
-            draw(rows)
-        def poll():
-            if closed[0]:return
-            latest=None;result=None;failure=None
+                pos=nx.spring_layout(graph,seed=23,iterations=26,
+                                     weight='support')
+                sizes=[85+14*min(graph.degree(node),10) for node in graph]
+                nx.draw_networkx_nodes(graph,pos,ax=axis,node_size=sizes,
+                                       node_color='#70afdb',alpha=.91)
+                normal=[(a,b) for a,b,d in graph.edges(data=True) if not d['fast']]
+                fast=[(a,b) for a,b,d in graph.edges(data=True) if d['fast']]
+                if normal:
+                    nx.draw_networkx_edges(graph,pos,edgelist=normal,ax=axis,
+                        node_size=140,arrows=True,arrowsize=10,width=1.05,
+                        edge_color='#688aa2',alpha=.55)
+                if fast:
+                    nx.draw_networkx_edges(graph,pos,edgelist=fast,ax=axis,
+                        node_size=140,arrows=True,arrowsize=12,width=2.5,
+                        edge_color='#ffae52',alpha=.94)
+                label_nodes=sorted(graph,key=lambda n:-graph.degree(n))[:22]
+                labels={n:(n[:21]+'…' if len(n)>21 else n) for n in label_nodes}
+                nx.draw_networkx_labels(graph,pos,labels=labels,ax=axis,
+                                        font_size=7,font_color='#ffffff')
+            axis.set_axis_off()
+            fig.tight_layout(pad=.9)
+            canvas.draw_idle()
+
+        def render(report, full=False):
+            if current['closed']:
+                return
+            candidates=report.get('candidate_sample',[])
+            metrics_var.set(
+                f"本文有效輸入叢集 {report.get('document_clusters_total',0):,}   |   "
+                f"本文記憶元 {report.get('document_memories_total',0):,}   |   "
+                f"有方向的連結 {report.get('document_links_total',0):,}   |   "
+                f"正式 SSRS 快速道路 {report.get('roads',0):,}   |   "
+                f"候選連結 {report.get('candidate_links',0):,}")
+            old_selection=link_table.selection()
+            selected_key=None
+            if old_selection:
+                r=evidence_by_row.get(old_selection[0])
+                if r:selected_key=(r['src'],r['dst'])
+            link_table.delete(*link_table.get_children())
+            evidence_by_row.clear()
+            preferred=None
+            for item in candidates:
+                iid=link_table.insert('', 'end',values=(
+                    item['source'][:42],item['target'][:42],
+                    item['support'],f"{item['weight']:.2f}",item['state']),
+                    tags=('fast' if item['fast_road'] else 'learning',))
+                evidence_by_row[iid]=item
+                if (item['src'],item['dst'])==selected_key:
+                    preferred=iid
+            if preferred is None and link_table.get_children():
+                preferred=link_table.get_children()[0]
+            if preferred is not None:
+                link_table.selection_set(preferred)
+                show_evidence()
+            if full:
+                concept_table.delete(*concept_table.get_children())
+                for i,item in enumerate(report.get('key_concepts',[]),1):
+                    concept_table.insert('','end',values=(
+                        i,item['label'],item['cluster_frequency']))
+            draw_graph(candidates)
+
+        def save_report():
+            report=current['report']
+            if not report:
+                return
+            name=Path(str(report.get('document','document'))).stem+'_flin_ssrs_report.json'
+            chosen=filedialog.asksaveasfilename(parent=win,title='儲存 FLIN 數學文件學習報告',
+               initialfile=name,defaultextension='.json',
+               filetypes=[('JSON file','*.json')])
+            if not chosen:
+                return
+            try:
+                Path(chosen).write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+                write_log('已匯出完整本次分析摘要：'+chosen)
+            except (OSError,TypeError) as exc:
+                messagebox.showerror('報告儲存失敗',str(exc),parent=win)
+        save_btn.configure(command=save_report)
+
+        def request_stop():
+            if current['active'] and current['cancel'] is not None:
+                current['cancel'].set()
+                stop_btn.configure(state='disabled')
+                phase_var.set('已要求結束：正在完成目前的資料庫寫入，已完成部分會保留。')
+                write_log('使用者按下「結束讀取」，正在安全停止。')
+        stop_btn.configure(command=request_stop)
+
+        def begin():
+            if current['active'] or self._closing:
+                return
+            path=Path(file_var.get().strip()).expanduser()
+            if not path.is_file():
+                messagebox.showwarning('尚未選擇文件','請先選擇有效的本機數學文件。',parent=win)
+                return
+            if path.suffix.casefold() not in ('.txt','.pdf','.md','.markdown','.rst','.tex','.csv','.html','.htm'):
+                messagebox.showerror('不支援的格式','請使用 PDF/TXT/MD/RST/TeX/CSV/HTML。',parent=win)
+                return
+            current['active']=True
+            current['report']=None
+            current['last_graph_key']=None
+            current['db_path']=Path(DB_PATH)
+            current['cancel']=threading.Event()
+            self._ssrs_document_stops.add(current['cancel'])
+            start_btn.configure(state='disabled')
+            choose_btn.configure(state='disabled')
+            path_input.configure(state='disabled')
+            stop_btn.configure(state='normal')
+            save_btn.configure(state='disabled')
+            simulate_btn.configure(state='disabled')
+            progressbar.configure(value=0)
+            phase_var.set('正在擷取文件文字…')
+            write_log(f"開始處理：{path.name} | 使用資料庫：{current['db_path'].name}")
+            job_cancel=current['cancel']
+            db_path=current['db_path']
+            def worker():
+                try:
+                    with contextlib.closing(database(path=db_path)) as con:
+                        report=flin_ssrs_read_document(con,path,
+                            progress=lambda info:events.put(('progress',info)),
+                            stop_event=job_cancel)
+                    events.put(('done',report))
+                except InterruptedError as exc:
+                    events.put(('stopped',str(exc)))
+                except Exception as exc:
+                    events.put(('error',type(exc).__name__+': '+str(exc)))
+            self._start_background_thread(target=worker,name='FLIN_SSRS_Document_Reader')
+        start_btn.configure(command=begin)
+
+        def simulate_document_route():
+            report=current['report']
+            if current['active'] or not report or self._closing:
+                return
+            picked=concept_table.selection()
+            if picked:
+                query=str(concept_table.item(picked[0],'values')[1])
+            elif report.get('key_concepts'):
+                query=report['key_concepts'][0]['label']
+            else:
+                write_log('此文件尚無可觸發的數學概念，無法執行路徑模擬。')
+                return
+            simulate_btn.configure(state='disabled')
+            write_log(f'測試記憶元「{query}」的整體網路 SSRS 傳播（隨機種子 42，無寫入）。')
+            db_path=current['db_path']
+            def sim_worker():
+                try:
+                    with contextlib.closing(database(path=db_path)) as con:
+                        outcome=abc_simulate(con,query,random_seed=42,
+                            pulse_hz=50.,input_duration=1.5,save=False,
+                            ssrs_enabled=True)
+                    result=outcome['ssrs']
+                    events.put(('simulation',{'query':query,
+                        'initial_roads':result['initial_roads'],
+                        'fast_traversals':result['fast_traversals'],
+                        'normal_traversals':result['normal_traversals'],
+                        'saved_time_s':result['transport_time_saved_s'],
+                        'explanation':result.get('zero_fast_hop_explanation','')}))
+                except Exception as exc:
+                    events.put(('simulation_error',str(exc)))
+            self._start_background_thread(target=sim_worker,name='FLIN_SSRS_Pulse_Demo')
+        simulate_btn.configure(command=simulate_document_route)
+
+        def polling():
+            if current['closed']:
+                return
+            snapshot=None;outcome=None
             while True:
-                try:kind,payload=updates.get_nowait()
-                except queue.Empty:break
-                if kind=='step':latest=payload
-                elif kind=='complete':result=payload
-                elif kind=='error':failure=payload
-            if latest:
-                label.set(f"Reading: {latest['document']} | section {latest['section']}/{latest['total']} | "
-                          f"new memories {latest['new_active_units']} | links updated {latest['link_updates']}")
-                render(latest['ssrs'])
-            if result:
-                finished[0]=True
-                label.set(f"{'Stopped' if result['cancelled'] else 'Completed'}: {result['sections_processed']} sections | {result['clusters_added']} "
-                          f"new input clusters | {result['roads_added']} new SSRS roads")
-                render(result)
-                keybox.delete('1.0','end')
-                keybox.insert('1.0','\n'.join(
-                    f"{x['cluster_frequency']:>3}  {x['label']}" for x in result['key_concepts']))
-                self.abc_refresh_status()
-            if failure:
-                finished[0]=True
-                label.set('Read failed: '+failure)
-                messagebox.showerror('SSRS Document Read',failure[:1300],parent=win)
-            if not finished[0]:win.after(250,poll)
-        def close():
-            closed[0]=True;cancel.set();plt.close(fig);win.destroy()
-        win.protocol('WM_DELETE_WINDOW',close)
-        poll()
+                try:
+                    typ,value=events.get_nowait()
+                except queue.Empty:
+                    break
+                if typ=='progress':
+                    snapshot=value
+                elif typ=='simulation':
+                    write_log(f"高速傳播測試 [{value['query']}]：正式道路 {value['initial_roads']}；"
+                              f"快速跳躍 {value['fast_traversals']} 次，普通跳躍 {value['normal_traversals']} 次；"
+                              f"累積節省傳播時間 {value['saved_time_s']:.5f} 秒。")
+                    if value.get('explanation'):
+                        write_log('備註：'+value['explanation'])
+                    simulate_btn.configure(state='normal')
+                elif typ=='simulation_error':
+                    write_log('模擬失敗：'+str(value))
+                    simulate_btn.configure(state='normal')
+                else:
+                    outcome=(typ,value)
+            if snapshot:
+                if snapshot.get('phase')=='extract':
+                    progressbar.configure(value=0)
+                    phase_var.set(f"PDF 擷取中：第 {snapshot['page']}/{snapshot['pages']} 頁；尚未開始建立記憶元")
+                else:
+                    part=int(snapshot.get('section',0))
+                    total=max(1,int(snapshot.get('total',1)))
+                    progressbar.configure(value=100*part/total)
+                    phase_var.set(f"讀取進度 {part}/{total} 段（{100*part/total:.1f}%）｜"
+                       f"新增記憶元 {snapshot['new_active_units']}｜"
+                       f"本次新輸入叢集 {snapshot['input_clusters']}｜"
+                       f"重複未增強 {snapshot.get('skipped_duplicates',0)}")
+                    render(snapshot['ssrs'])
+            if outcome:
+                typ,info=outcome
+                current['active']=False
+                self._ssrs_document_stops.discard(current['cancel'])
+                current['cancel']=None
+                start_btn.configure(state='normal')
+                stop_btn.configure(state='disabled')
+                choose_btn.configure(state='normal')
+                path_input.configure(state='normal')
+                if typ=='done':
+                    current['report']=info
+                    render(info,full=True)
+                    progressbar.configure(value=100*info['sections_processed']/max(1,info['sections_total']))
+                    state='已停止' if info['cancelled'] else '完成'
+                    phase_var.set(
+                       f"{state}：處理 {info['sections_processed']}/{info['sections_total']} 段；"
+                       f"本次新記憶元 {info['new_units']}、連結更新 {info['link_updates']} 次、"
+                       f"新增高速路 {info['roads_added']} 條；"
+                       f"略過已學過的輸入 {info['duplicates_skipped']} 組。")
+                    save_btn.configure(state='normal')
+                    simulate_btn.configure(state='normal' if info.get('key_concepts') else 'disabled')
+                    write_log(phase_var.get())
+                    for warning in info.get('warnings',[]):
+                        write_log('⚠ '+warning)
+                    if not info['roads']:
+                        write_log('尚無正式 SSRS 道路：請看「單向連結 / SSRS」頁的候選道路、曝光次數及缺少條件。')
+                    self.abc_refresh_status()
+                elif typ=='stopped':
+                    phase_var.set('已取消擷取：'+str(info)+'；沒有開始本次學習。')
+                    write_log(phase_var.get())
+                else:
+                    phase_var.set('讀取失敗：'+str(info))
+                    write_log(phase_var.get())
+                    messagebox.showerror('FLIN 文件讀取失敗',str(info)[:1100],parent=win)
+            if not current['closed'] and win.winfo_exists():
+                current['poll_id']=win.after(200,polling)
+
+        def on_destroy(event):
+            if event.widget is not win:
+                return
+            current['closed']=True
+            timer=current.pop('poll_id',None)
+            if timer is not None:
+                try:win.after_cancel(timer)
+                except tk.TclError:pass
+            if current['cancel'] is not None:
+                current['cancel'].set()
+            if getattr(self,'_flin_document_window',None) is win:
+                self._flin_document_window=None
+            plt.close(fig)
+
+        def window_close():
+            on_destroy(type('DestroyEvent',(),{'widget':win})())
+            win.destroy()
+        win.bind('<Destroy>',on_destroy,add='+')
+        win.protocol('WM_DELETE_WINDOW',window_close)
+        axis.set_facecolor(self.PANEL)
+        axis.text(.5,.5,'請先選擇文件並按「開始讀取」',ha='center',va='center',
+                  transform=axis.transAxes,color='#e2e8f0')
+        axis.set_axis_off()
+        canvas.draw_idle()
+        polling()
 
     def abc_start_simulation(self):
         if self.abc_worker_active:
@@ -12228,6 +12820,8 @@ class NetworkWindow:
             return
         self._closing = True
         self.stop_event.set()
+        for stop in tuple(self._ssrs_document_stops):
+            stop.set()
         self.pause_event.clear()
         for stop in tuple(getattr(self,'generation_jobs',{}).values()):
             stop.set()
@@ -12710,6 +13304,8 @@ if __name__ == "__main__":
                         help='Read a TXT/PDF/Markdown/HTML math article, learn inputs and form durable SSRS fast roads')
     parser.add_argument('--ssrs-report',action='store_true',help='Show real persisted SSRS fast roads and learning evidence')
     parser.add_argument('--ssrs-example',metavar='TXT',help='Create a synthetic sample mathematical article for SSRS testing')
+    parser.add_argument('--ssrs-self-test',action='store_true',
+                        help='Run offline document/SSRS regression tests using a temporary isolated database')
     parser.add_argument('--flin-related','--flin-bridges',dest='flin_bridges',metavar='CONCEPTS',
         help='Read-only related concepts reached from comma-separated memory inputs')
     parser.add_argument('--bridge-pulses',type=int,default=360,
@@ -12792,6 +13388,13 @@ if __name__ == "__main__":
             print('FLIN related-concepts search failed:',type(exc).__name__,str(exc),file=sys.stderr)
             sys.exit(1)
         sys.exit(0)
+    if args.ssrs_self_test:
+        try:
+            print(json.dumps(flin_ssrs_self_test(),ensure_ascii=False,indent=2))
+            sys.exit(0)
+        except Exception as exc:
+            print('SSRS regression check failed:',type(exc).__name__,str(exc),file=sys.stderr)
+            sys.exit(1)
     if args.ssrs_example:
         print('Sample mathematics article:',flin_ssrs_write_example(args.ssrs_example))
         sys.exit(0)
