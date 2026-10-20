@@ -1,4 +1,4 @@
-# FLIN v23.0 — Feature-Link Intelligence Network
+# FLIN — Feature-Link Intelligence Network
 
 **Source-Grounded Memory Network · SSRS Fast Memory Groups · Desktop 3D Visualization**
 
