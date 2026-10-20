@@ -82,7 +82,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intelligence Network | Source-Grounded Fast Memory Groups v23.0"
+APP_TITLE = "FLIN — Feature-Link Intelligence Network | Automatic Literature-Driven SSRS v24.0"
 
 
 def _flin_linux_cgroup_resources():
@@ -1499,7 +1499,8 @@ def database(path=None) -> sqlite3.Connection:
 EXPORT_CORE_TABLES = ('units', 'edges', 'positions', 'network_meta',
                       'abc_units','abc_edges','abc_ssrs','abc_meta','ssrs_fast_roads','ssrs_road_evidence','ssrs_document_reads',
                        'abc_sources','abc_source_topics','abc_topics','abc_positions',
-                       'ssrs_memory_groups','ssrs_memory_group_members','ssrs_memory_group_roads')
+                       'ssrs_memory_groups','ssrs_memory_group_members','ssrs_memory_group_roads',
+                       'ssrs_cooccurrence_evidence')
 EXPORT_PROVENANCE_TABLES = (
     'theories', 'papers', 'paper_theories', 'paper_math_applications', 'mentions', 'relation_evidence',
     'unit_terms', 'wikipedia_references', 'wikipedia_reference_scans',
@@ -1510,7 +1511,7 @@ EXPORT_PROVENANCE_TABLES = (
     'abc_sources','abc_source_topics','abc_topics','abc_positions','flin_source_depth',
     'abc_input_clusters','abc_cluster_features','abc_cluster_links','abc_replay_queue',
     'flin_patterns','flin_pattern_evidence','flin_shortcut_members','flin_cost_decisions',
-    'flin_ingest_diagnostics','ssrs_road_evidence','ssrs_document_reads','ssrs_document_read_sessions',
+    'flin_ingest_diagnostics','ssrs_road_evidence','ssrs_cooccurrence_evidence','ssrs_document_reads','ssrs_document_read_sessions',
 )
 
 
@@ -5661,6 +5662,7 @@ class Collector(threading.Thread):
         con=database()
         found=processed=linked=failures=0
         accepted_papers=new_memories=new_input_clusters=missing_math_inputs=0
+        new_fast_roads=0;colored_groups=0
         phase='Wikipedia';state='running';failure_detail=''
         self._send_worker(worker,theory,phase)
         self.log(f'Starting direct FLIN learning from mathematical sources: {theory}')
@@ -5704,6 +5706,7 @@ class Collector(threading.Thread):
             def accept_work(work, fallback_pdf_url=''):
                 nonlocal found,processed,linked,failures
                 nonlocal accepted_papers,new_memories,new_input_clusters,missing_math_inputs
+                nonlocal new_fast_roads,colored_groups
                 if self.stopped.is_set():return
                 self.wait_if_paused()
                 if self.stopped.is_set():return
@@ -5758,6 +5761,8 @@ class Collector(threading.Thread):
                 linked+=outcome['edges']
                 new_memories+=outcome['promoted']
                 new_input_clusters+=outcome['clusters']
+                new_fast_roads+=outcome.get('ssrs_new_fast_roads',0)
+                colored_groups+=outcome.get('ssrs_groups',0)
                 missing_math_inputs+=int(not outcome.get('extracted',0))
                 if processed<=3 or processed%10==0:
                     self._send_worker(worker,theory,'Learning from research papers',processed,
@@ -5845,6 +5850,8 @@ class Collector(threading.Thread):
                      f'{accepted_papers} passed mathematics quality checks; '
                      f'{new_input_clusters} grounded input clusters; '
                      f'{new_memories} new active memories; {linked} directed-link updates; '
+                     f'{new_fast_roads} new AUTO SSRS fast roads; '
+                     f'{colored_groups} source-group observations (not necessarily distinct groups); '
                      f'{missing_math_inputs} accepted papers without eligible mathematical input.')
             session.close();con.close()
 
@@ -6061,6 +6068,20 @@ class Collector(threading.Thread):
                              f"{recovered['failed']} source errors.")
             except Exception as exc:
                 self.log('Warning: cached-source recovery postponed: '+str(exc)[:220])
+            # Older networks already contain literature inputs; automatically
+            # migrate their repeated co-mentions during ordinary build startup.
+            # Cursor makes the sweep bounded and resumable between launches.
+            try:
+                with contextlib.closing(database()) as migration_con:
+                    upgraded=flin_ssrs_rebuild_existing_groups(migration_con,limit=80,
+                                                                stop_event=self.stopped)
+                if upgraded['sources_processed']:
+                    self.log('Automatic SSRS evidence migration: '
+                             f"{upgraded['sources_processed']} saved sources examined; "
+                             f"{upgraded['groups_found']} source groups found.")
+                    self.out.put(('refresh',None))
+            except Exception as exc:
+                self.log('Warning: historical SSRS upgrade deferred: '+str(exc)[:200])
             for i in range(1, self.workers+1):
                 thread = threading.Thread(target=self._worker_loop, args=(i,), daemon=True)
                 thread.start()
@@ -6569,6 +6590,19 @@ def abc_schema(con):
         );
         CREATE INDEX IF NOT EXISTS idx_ssrs_road_evidence_source
           ON ssrs_road_evidence(source_id,src,dst);
+        -- v24: distinguish local co-mention observations from ORDERED pulse
+        -- observations.  Co-mentions qualify an existing one-way route for
+        -- high-speed transmission; they never invent conceptual graph edges.
+        CREATE TABLE IF NOT EXISTS ssrs_cooccurrence_evidence(
+          src TEXT NOT NULL, dst TEXT NOT NULL,
+          cluster_id TEXT NOT NULL, source_id TEXT NOT NULL,
+          observed TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY(src,dst,cluster_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssrs_cooc_source
+          ON ssrs_cooccurrence_evidence(source_id,src,dst);
+        CREATE INDEX IF NOT EXISTS idx_ssrs_cooc_road
+          ON ssrs_cooccurrence_evidence(src,dst);
         -- v23: SSRS fast-memory groups are views over EXISTING units and
         -- existing directed fast roads. Each component is supported by one
         -- concrete source's independently positioned input clusters.
@@ -6907,6 +6941,7 @@ def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *
     extra=[name for name,_ in keyphrases(raw,str(title or ''),limit=24)]
     candidates=[]
     ordinal=0
+    fingerprint_occurrences=defaultdict(int)
 
     def submit(quote,base_index,kind,*,title_input=False,bridge=None,recognized_terms=None):
         nonlocal ordinal
@@ -6947,8 +6982,14 @@ def abc_extract_input_clusters(paper_id, title, abstract, fulltext='', url='', *
             # Document passages at different positions are distinct effective-input
             # experiences even when their literal wording is identical. The stable
             # namespace (section index + sentence ordinal) makes rereads idempotent.
-            # Research-paper extraction keeps its historical IDs unchanged.
-            episode = ('|'+str(event_namespace)+'|'+str(ordinal)) if event_namespace else ''
+            # Existing FIRST occurrences retain their old paper IDs. Repeated
+            # literal statements at DISTINCT positions have distinct IDs even
+            # in automatically retrieved research papers. Re-ingestion of the
+            # same ordered source stays idempotent.
+            repetition=fingerprint_occurrences[fingerprint]
+            fingerprint_occurrences[fingerprint]+=1
+            episode = ('|'+str(event_namespace)+'|'+str(ordinal)) if event_namespace else (
+                '|repeated-position:'+str(repetition) if repetition else '')
             cluster_id='online:'+hashlib.sha256(
                 (str(paper_id)+'|'+fingerprint+episode).encode('utf-8')).hexdigest()[:32]
             # Keep title concepts, then prioritize same-sentence multi-feature
@@ -7378,14 +7419,113 @@ def flin_association_health(con):
 SSRS_GROUP_MIN_MENTIONS = 2  # per source and independent input position
 SSRS_GROUP_MIN_PAIR_EVENTS = 2
 SSRS_GROUP_MAX_SOURCE_MEMORIES = 160
+# Consecutive repeated mentions in the SAME source supply independent evidence.
+# No source co-mention alone fabricates a directed edge or a reciprocal route.
+SSRS_AUTO_COOCCURRENCE_MIN_CLUSTERS = 2
+
+
+def flin_ssrs_promote_source_cooccurrences(con, source_id):
+    """Automatically qualify fast roads using frequent SAME-source co-mentions.
+
+    A co-mention means two active memories were observed in the same effective
+    input cluster, NOT merely anywhere within the same paper. Independently
+    positioned clusters count once each.  Qualification additionally requires
+    an existing directed abc_edges row, repeated link observations and enough
+    memory-unit exposures. This never writes abc_edges or reverse routes.
+    """
+    source_id=str(source_id or '')
+    if not source_id:
+        return {'co_mentioned_pairs':0,'new_fast_roads':0,'source_votes':0}
+    frequent=dict(con.execute('''SELECT f.unit_id, COUNT(DISTINCT f.cluster_id) AS n
+        FROM abc_cluster_features f
+        JOIN abc_input_clusters c ON c.id=f.cluster_id
+        JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
+        WHERE c.paper_id=? GROUP BY f.unit_id HAVING n>=?
+        ORDER BY n DESC,f.unit_id LIMIT ?''',
+        (source_id,SSRS_GROUP_MIN_MENTIONS,SSRS_GROUP_MAX_SOURCE_MEMORIES)))
+    if len(frequent)<2:
+        return {'co_mentioned_pairs':0,'new_fast_roads':0,'source_votes':0}
+    relevant=set(frequent)
+    # Only this paper's bounded qualifying clusters are scanned, not the entire
+    # literature database. Order and source position are saved in SQLite.
+    rows=con.execute('''SELECT c.id,f.unit_id
+        FROM abc_input_clusters c
+        JOIN abc_cluster_features f ON f.cluster_id=c.id
+        WHERE c.paper_id=? ORDER BY c.rowid,f.position''',(source_id,)).fetchall()
+    observed=defaultdict(set)
+    current_id=None
+    members=set()
+    def add_cluster(cid, unit_ids):
+        unique=sorted(unit_ids & relevant)
+        for i,a in enumerate(unique):
+            for b in unique[i+1:]:
+                observed[(a,b)].add(cid)
+    for cid,uid in rows:
+        if cid!=current_id:
+            if current_id is not None:add_cluster(current_id,members)
+            members=set();current_id=cid
+        members.add(uid)
+    if current_id is not None:add_cluster(current_id,members)
+    qualified={pair:ids for pair,ids in observed.items()
+               if len(ids)>=SSRS_AUTO_COOCCURRENCE_MIN_CLUSTERS}
+    if not qualified:
+        return {'co_mentioned_pairs':0,'new_fast_roads':0,'source_votes':0}
+    ids=sorted(relevant)
+    placeholders=','.join('?' for _ in ids)
+    existing=con.execute('''SELECT e.src,e.dst,e.weight,e.observations,
+                ss.exposures,dd.exposures
+        FROM abc_edges e
+        JOIN abc_ssrs ss ON ss.unit_id=e.src
+        JOIN abc_ssrs dd ON dd.unit_id=e.dst
+        WHERE e.src IN ('''+placeholders+''') AND e.dst IN ('''+placeholders+')',
+        (*ids,*ids)).fetchall()
+    formed=0; votes=0
+    with con:
+        for src,dst,weight,edge_obs,src_exp,dst_exp in existing:
+            if src==dst:continue
+            clusters=qualified.get(tuple(sorted((src,dst))))
+            if not clusters:continue
+            con.executemany('''INSERT OR IGNORE INTO ssrs_cooccurrence_evidence
+                (src,dst,cluster_id,source_id) VALUES(?,?,?,?)''',
+                ((src,dst,cid,source_id) for cid in sorted(clusters)))
+            votes+=len(clusters)
+            if (float(weight)<SSRS_EVIDENCE_MIN_WEIGHT or
+                    int(edge_obs)<SSRS_EVIDENCE_MIN_CLUSTERS or
+                    min(int(src_exp),int(dst_exp))<SSRS_EVIDENCE_MIN_EXPOSURES):
+                continue
+            # An ordered observation and the same-cluster co-mention are the
+            # same physical input event, never counted as two independent votes.
+            support=con.execute('''SELECT COUNT(*) FROM (
+                SELECT cluster_id FROM ssrs_road_evidence WHERE src=? AND dst=?
+                UNION
+                SELECT cluster_id FROM ssrs_cooccurrence_evidence WHERE src=? AND dst=?)''',
+                (src,dst,src,dst)).fetchone()[0]
+            if support<SSRS_EVIDENCE_MIN_CLUSTERS:continue
+            cursor=con.execute('''INSERT OR IGNORE INTO ssrs_fast_roads(src,dst,support)
+                                VALUES(?,?,?)''',(src,dst,support))
+            if cursor.rowcount:formed+=1
+            else:
+                con.execute('''UPDATE ssrs_fast_roads SET support=MAX(support,?),
+                    updated=CURRENT_TIMESTAMP WHERE src=? AND dst=?''',
+                    (support,src,dst))
+    return {'co_mentioned_pairs':len(qualified),
+            'new_fast_roads':formed,'source_votes':votes}
+
+
+def flin_ssrs_auto_update_source(con, source_id):
+    """Single automatic learning hook for papers, Wikipedia, and cached input."""
+    evidence=flin_ssrs_promote_source_cooccurrences(con,source_id)
+    groups=flin_ssrs_group_rebuild(con,source_id)
+    return {**evidence,**groups}
 
 
 def flin_ssrs_group_rebuild(con, source_id):
     """Materialize source-specific components of verified fast roads, idempotently.
 
     Mere membership in the same PDF never creates an association or fast road.
-    The edge must exist in abc_edges AND ssrs_fast_roads with >=2 local input
-    events, and each endpoint must appear >=2 times in that same source.
+    Each colored route must exist in abc_edges AND ssrs_fast_roads. Local
+    evidence can be either repeated ordered inputs OR repeated same-cluster
+    co-mentions; both retain source locations and never imply a proof.
     """
     source_id = str(source_id or '')
     if not source_id:
@@ -7399,11 +7539,13 @@ def flin_ssrs_group_rebuild(con, source_id):
     valid = set(frequent)
     # Indexed by source_id, avoiding global scans of the full graph.
     supported = con.execute('''SELECT ev.src,ev.dst,COUNT(DISTINCT ev.cluster_id) n
-        FROM ssrs_road_evidence ev
+        FROM (SELECT src,dst,cluster_id FROM ssrs_road_evidence WHERE source_id=?
+              UNION
+              SELECT src,dst,cluster_id FROM ssrs_cooccurrence_evidence WHERE source_id=?) ev
         JOIN ssrs_fast_roads r ON r.src=ev.src AND r.dst=ev.dst
         JOIN abc_edges e ON e.src=ev.src AND e.dst=ev.dst
-        WHERE ev.source_id=? GROUP BY ev.src,ev.dst HAVING n>=?''',
-        (source_id, SSRS_GROUP_MIN_PAIR_EVENTS)).fetchall() if len(valid)>=2 else []
+        GROUP BY ev.src,ev.dst HAVING n>=?''',
+        (source_id,source_id,SSRS_GROUP_MIN_PAIR_EVENTS)).fetchall() if len(valid)>=2 else []
     adjacency = defaultdict(set)
     road_rows = []
     for a,b,n in supported:
@@ -7495,7 +7637,7 @@ def flin_ssrs_list_groups(con, *, source_id=None, limit=80, include_members=True
 def flin_ssrs_rebuild_existing_groups(con, *, limit=300, stop_event=None):
     """Incremental migration for legacy documents and already-indexed papers."""
     abc_schema(con)
-    key='ssrs_group_backfill_cursor_v23'
+    key='ssrs_auto_cooccurrence_cursor_v24'
     row=con.execute('SELECT value FROM abc_meta WHERE key=?',(key,)).fetchone()
     cursor=row[0] if row else ''
     limit=max(1,min(10000,int(limit)))
@@ -7504,7 +7646,7 @@ def flin_ssrs_rebuild_existing_groups(con, *, limit=300, stop_event=None):
     total=created=0
     for (source_id,) in source_ids:
         if stop_event is not None and stop_event.is_set():break
-        report=flin_ssrs_group_rebuild(con,source_id)
+        report=flin_ssrs_auto_update_source(con,source_id)
         total+=1;created+=report['groups']
         with con:con.execute('INSERT OR REPLACE INTO abc_meta(key,value) VALUES(?,?)',
                              (key,source_id))
@@ -7535,12 +7677,15 @@ def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', u
             done+=1;promoted+=res['promoted'];edges+=res['edges']
     # One bounded reconcile per paper, not one SQLite graph pass per sentence.
     replay=abc_reconcile_pending(con,limit=600 if document_event_namespace else 400,
-        source_filter=str(paper_id) if document_event_namespace else None)
+        source_filter=str(paper_id))
     edges+=replay['edges']
-    group_info=(flin_ssrs_group_rebuild(con,paper_id) if done and
-                not document_event_namespace else {'groups':0,'members':0,'roads':0})
+    # AUTOMATIC on every scholarly source, including cached and Wikipedia
+    # sources. No document chooser, separate learner, or post-build button.
+    group_info=flin_ssrs_auto_update_source(con,paper_id)
     return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters),
             'ssrs_groups':group_info['groups'],
+            'ssrs_new_fast_roads':group_info['new_fast_roads'],
+            'ssrs_co_mentioned_pairs':group_info['co_mentioned_pairs'],
             'new_links':replay['new_links'], 'reinforcements':replay['reinforcements'],
             'omitted_due_to_cluster_cap':extraction_stats.get('omitted_due_to_cluster_cap',0)}
 
@@ -7992,10 +8137,12 @@ def flin_ssrs_report(con, limit=150, *, source_id=None):
     mathematical proofs. A single article may supply multiple observations.
     """
     abc_schema(con)
-    evidence_filter = (''' AND EXISTS (SELECT 1 FROM ssrs_road_evidence ev
-                 WHERE ev.src=r.src AND ev.dst=r.dst AND ev.source_id=?) '''
+    evidence_filter = (''' AND (EXISTS (SELECT 1 FROM ssrs_road_evidence ev
+                 WHERE ev.src=r.src AND ev.dst=r.dst AND ev.source_id=?)
+                 OR EXISTS (SELECT 1 FROM ssrs_cooccurrence_evidence co
+                 WHERE co.src=r.src AND co.dst=r.dst AND co.source_id=?)) '''
                        if source_id else '')
-    values = (str(source_id),) if source_id else ()
+    values = (str(source_id),str(source_id)) if source_id else ()
     base = """ FROM ssrs_fast_roads r
         JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
         JOIN abc_units ua ON ua.id=r.src AND ua.status='active'
@@ -8007,10 +8154,14 @@ def flin_ssrs_report(con, limit=150, *, source_id=None):
         values+(max_items,)).fetchall()
     total = con.execute('SELECT COUNT(*) '+base, values).fetchone()[0]
     if source_id:
-        observations = con.execute('SELECT COUNT(*) FROM ssrs_road_evidence WHERE source_id=?',
-                                   (str(source_id),)).fetchone()[0]
+        observations = con.execute('''SELECT COUNT(*) FROM (
+            SELECT src,dst,cluster_id FROM ssrs_road_evidence WHERE source_id=?
+            UNION SELECT src,dst,cluster_id FROM ssrs_cooccurrence_evidence WHERE source_id=?)''',
+            (str(source_id),str(source_id))).fetchone()[0]
     else:
-        observations = con.execute('SELECT COUNT(*) FROM ssrs_road_evidence').fetchone()[0]
+        observations = con.execute('''SELECT COUNT(*) FROM (
+            SELECT src,dst,cluster_id FROM ssrs_road_evidence
+            UNION SELECT src,dst,cluster_id FROM ssrs_cooccurrence_evidence)''').fetchone()[0]
     result = {'roads': total, 'evidence_rows': observations,
               'source_id': source_id, 'speed_ratio_default': SSRS_DEFAULTS['speed_ratio'],
               'road_sample': [dict(src=a,dst=b,support=n,source=al,target=bl,weight=w)
@@ -8141,7 +8292,7 @@ def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
             clusters+=item['clusters'];units+=item['promoted'];links+=item['edges']
             processed+=1
             if processed%8==0 and clusters:
-                flin_ssrs_group_rebuild(con,doc_id)
+                flin_ssrs_auto_update_source(con,doc_id)
             now=time.monotonic()
             if progress and (i==0 or i+1==len(sections) or i%3==0 or now-last_update>0.6):
                 snapshot=flin_ssrs_report(con,limit=80,source_id=doc_id)
@@ -8171,7 +8322,7 @@ def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
         warnings.append(f'{empty_sections}/{processed} processed sections had no qualifying mathematical input clusters.')
     if cap_omissions:
         warnings.append(f'{cap_omissions} valid-looking input events exceeded the per-section extraction budget and were NOT ingested.')
-    group_summary=flin_ssrs_group_rebuild(con,doc_id)
+    group_summary=flin_ssrs_auto_update_source(con,doc_id)
     report=flin_ssrs_report(con,limit=200,source_id=doc_id)
     report['ssrs_memory_groups']=flin_ssrs_list_groups(con,source_id=doc_id)
     report['ssrs_group_count']=group_summary['groups']
@@ -8251,7 +8402,69 @@ def flin_ssrs_self_test():
                 text,meta=flin_ssrs_read_text(pdf,with_metadata=True)
                 assert meta['pages_read']==1 and len(text.strip())>=60
                 pdf_info={'pages_read':meta['pages_read'],'extracted_chars':len(text)}
-            return {'ok':True,'offline':True,'original':{
+            # v24: automatic scholarly retrieval path is the DEFAULT.
+            # No file picker, local PDF, human-entered text or network APIs.
+            with contextlib.closing(database(path=root/'auto_research.sqlite3')) as auto_con:
+                abc_enable(auto_con)
+                paper_id='doi:10.0000/offline-automatic-ssrs'
+                paper_title='Covariance matrix and eigenvalue mathematics'
+                abc_register_source(auto_con,'paper:'+paper_id,'paper',paper_title,
+                                    'https://doi.org/10.0000/offline-automatic-ssrs',
+                                    SSRS_EXAMPLE_DOCUMENT)
+                paper_clusters=abc_extract_input_clusters(paper_id,paper_title,
+                    SSRS_EXAMPLE_DOCUMENT,max_clusters=96)
+                auto_first=abc_ingest_online_clusters(auto_con,paper_id,paper_title,
+                    SSRS_EXAMPLE_DOCUMENT,prepared_clusters=paper_clusters)
+                assert auto_first['clusters']>0 and auto_first['ssrs_groups']>=1
+                assert auto_con.execute('''SELECT COUNT(*) FROM ssrs_cooccurrence_evidence''').fetchone()[0]>0
+                remembered=auto_con.execute('SELECT COUNT(*) FROM abc_edges').fetchone()[0]
+                evidence_before=auto_con.execute('SELECT COUNT(*) FROM ssrs_cooccurrence_evidence').fetchone()[0]
+                auto_again=abc_ingest_online_clusters(auto_con,paper_id,paper_title,
+                    SSRS_EXAMPLE_DOCUMENT,prepared_clusters=paper_clusters)
+                assert auto_again['clusters']==0 and auto_again['edges']==0
+                assert auto_con.execute('SELECT COUNT(*) FROM abc_edges').fetchone()[0]==remembered
+                assert auto_con.execute('SELECT COUNT(*) FROM ssrs_cooccurrence_evidence').fetchone()[0]==evidence_before
+                # Test the INDEPENDENT promotion path: repeated SAME-paper
+                # co-mentions create a FAST road along an existing ONE-WAY
+                # association even when NO ordered-road evidence was recorded.
+                source_two='paper:offline-co-mentions-only'
+                with auto_con:
+                    abc_register_source(auto_con,'paper:'+source_two,'paper',
+                                        'Repeated matrix spectral co-mentions')
+                    for uid in ('v24:test:alpha','v24:test:beta'):
+                        auto_con.execute('''INSERT INTO abc_units(id,label,status,quality)
+                            VALUES(?,?,'active',95)''',(uid,uid))
+                        auto_con.execute('''INSERT INTO abc_ssrs(unit_id,priority,exposures)
+                            VALUES(?,0.2,4)''',(uid,))
+                    auto_con.execute('''INSERT INTO abc_edges(src,dst,weight,observations)
+                        VALUES('v24:test:alpha','v24:test:beta',2.0,3)''')
+                    for i in range(3):
+                        cid=f'v24:test:cooccur:{i}'
+                        auto_con.execute('''INSERT INTO abc_input_clusters
+                          (id,paper_id,quote,feature_count) VALUES(?,?,?,2)''',
+                          (cid,source_two,f'Observed pair in source statement {i}'))
+                        auto_con.executemany('''INSERT INTO abc_cluster_features
+                            (cluster_id,unit_id,position) VALUES(?,?,1.0)''',
+                            [(cid,'v24:test:alpha'),(cid,'v24:test:beta')])
+                promoted=flin_ssrs_auto_update_source(auto_con,source_two)
+                assert promoted['new_fast_roads']==1 and promoted['groups']==1
+                assert auto_con.execute('''SELECT COUNT(*) FROM ssrs_fast_roads
+                    WHERE src='v24:test:beta' AND dst='v24:test:alpha' ''').fetchone()[0]==0
+                other_groups=flin_ssrs_list_groups(auto_con,source_id=source_two)
+                first_groups=flin_ssrs_list_groups(auto_con,source_id=paper_id)
+                assert first_groups and other_groups
+                assert first_groups[0]['color']!=other_groups[0]['color']
+                assert not auto_con.execute('''SELECT 1 FROM ssrs_fast_roads r
+                   LEFT JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
+                   WHERE e.src IS NULL LIMIT 1''').fetchone()
+                auto_summary={'paper_clusters':auto_first['clusters'],
+                    'co_mentioned_pairs':auto_first['ssrs_co_mentioned_pairs'],
+                    'groups':auto_first['ssrs_groups'],
+                    'independent_co_mention_promotion':promoted['new_fast_roads'],
+                    'two_distinct_group_colors':True,
+                    'idempotent_paper_ingestion':True,
+                    'no_invented_reverse_roads':True}
+            return {'ok':True,'offline':True,'automatic_literature':auto_summary,'original':{
                  'memories':original['document_memories_total'],
                  'directed_links':original['document_links_total'],
                  'fast_roads':original['roads'],
@@ -9129,15 +9342,14 @@ class NetworkWindow:
                    command=self.flin_ui_retrofit,style='Dark.TButton').pack(fill='x',pady=(5,1))
         ttk.Button(box,text='Shortcut and Cost Report',
                    command=self.flin_ui_cost_report,style='Dark.TButton').pack(fill='x',pady=(2,1))
-        ttk.Button(box,text='Read Document → Learn FAST Groups (TXT/PDF/MD)',
-                   command=self.flin_ssrs_document_window,
-                   style='Accent.TButton').pack(fill='x',pady=(7,2))
-        ttk.Button(box,text='Create Sample Mathematics Article (.txt)',
-                   command=self.flin_ssrs_create_example,
-                   style='Dark.TButton').pack(fill='x',pady=(2,1))
+        self.label(box,'Automatic SSRS: literature sources are discovered and ingested '
+                   'during network building. Repeated SAME-source co-mentions '
+                   'automatically qualify existing one-way links as fast roads; '
+                   'no document upload is required.',note=True,wraplength=345).pack(
+                   anchor='w',pady=(7,2))
 
         box=self._group(inside,'02B  SSRS Fast Memory Groups',
-            'Learning a document or paper creates source-grounded FAST groups in the SAME memory network. '
+            'Automatic paper and Wikipedia learning creates source-grounded FAST groups in the SAME memory network. '
             'Each color identifies a source-supported group; a memory may belong to multiple groups.')
         self.ssrs_group_choice=tk.StringVar(value='All colored groups')
         self.ssrs_group_choice_ids={'All colored groups':None,'No group colors':'none'}
@@ -9270,7 +9482,7 @@ class NetworkWindow:
         self.label(box,'The offline index contains only imported/downloaded records; full text is not guaranteed.',note=True).pack(anchor='w')
         tk.Label(box,textvariable=self.catalog_status,bg=self.PANEL,fg=self.MUTED,
                  anchor='w').pack(fill='x',pady=(1,5))
-        self.run_btn=ttk.Button(box,text='Start Building (Literature → FLIN)',style='Accent.TButton',command=self.start)
+        self.run_btn=ttk.Button(box,text='Start Auto Building (Literature + SSRS)',style='Accent.TButton',command=self.start)
         self.run_btn.pack(fill='x')
         self.retry_btn=ttk.Button(box,text='Retry Previously Failed Topics (keep network)',
               style='Dark.TButton',command=lambda:self.start(retry_failed_only=True))
@@ -9381,7 +9593,7 @@ class NetworkWindow:
             return
         if not messagebox.askyesno('Create a Separate FLIN Network',
             'Create a new isolated mathematics network; existing databases and indexes will be retained.\n'
-            'You may read a local math document immediately or start literature discovery. Continue?',parent=self.root):
+            'Start automatic literature discovery to grow memory units, directed links and colored SSRS groups. Continue?',parent=self.root):
             return
         try:
             name='FLIN_Mathematics_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -9389,7 +9601,7 @@ class NetworkWindow:
             if not self._activate_network(netid):return
             with database() as con:abc_enable(con)
             self.abc_refresh_status()
-            messagebox.showinfo('Created','Switched to '+name+'.\nYou can now read a math document or start collecting literature; both learn in the same FLIN graph.',parent=self.root)
+            messagebox.showinfo('Created','Switched to '+name+'.\nClick Start Auto Building to discover mathematical literature and automatically build SSRS groups.',parent=self.root)
         except Exception as exc:
             messagebox.showerror('Creation Failed',str(exc),parent=self.root)
 
@@ -10893,7 +11105,7 @@ class NetworkWindow:
                 f'New-source verification becomes available in up to {FLIN_FRONTIER_RECHECK_HOURS} hours.')
             self.status.set('Source frontier completed; FLIN knowledge can still grow when new sources appear.')
         else:
-            self.run_btn.configure(state='normal',text='Start Building (Literature → FLIN)')
+            self.run_btn.configure(state='normal',text='Start Auto Building (Literature + SSRS)')
         return completed
 
 
@@ -10996,7 +11208,7 @@ class NetworkWindow:
                                    references_only=references_only,
                                    manual_topics=manual_topics,
                                    continuous=continuous)
-        self.run_btn.configure(state='disabled',text='Start Building (Literature → FLIN)')
+        self.run_btn.configure(state='disabled',text='Start Auto Building (Literature + SSRS)')
         self.retry_btn.configure(state="disabled")
         self.wikiref_btn.configure(state="disabled")
         self.pause_btn.configure(state="normal", text="Pause")
@@ -11828,7 +12040,7 @@ class NetworkWindow:
                         self.pipeline_title.set('FLIN  already proceed enter provider cooldown  · Memory Unit Network already save ')
                         self.status.set('Waiting for provider retry. Click Explore Now to retry immediately.')
                     else:
-                        self.run_btn.configure(state='disabled',text='Start Building (Literature → FLIN)')
+                        self.run_btn.configure(state='disabled',text='Start Auto Building (Literature + SSRS)')
                         if phase=='waiting_workers':
                             self.pipeline_title.set(' Waiting existing Literature workers Completed ')
                             self.status.set(f' still with  {info}  items Topic learning learning work not yet Completed ; can click abort and save ')
@@ -11960,7 +12172,7 @@ class NetworkWindow:
                 elif kind == "done":
                     self._collector_completion_observed = True
                     self.abc_refresh_status()
-                    self.run_btn.configure(state='normal',text='Start Building (Literature → FLIN)')
+                    self.run_btn.configure(state='normal',text='Start Auto Building (Literature + SSRS)')
                     self.retry_btn.configure(state="normal")
                     self.wikiref_btn.configure(state="normal")
                     self.pause_btn.configure(state="disabled", text="Pause")
@@ -12016,7 +12228,7 @@ class NetworkWindow:
                 # Recover a disabled button if the producer exited without a
                 # normal completion event (for example a fatal interpreter error).
                 self._collector_completion_observed=True
-                self.run_btn.configure(state='normal',text='Start Building (Literature → FLIN)')
+                self.run_btn.configure(state='normal',text='Start Auto Building (Literature + SSRS)')
                 self.pause_btn.configure(state='disabled')
                 self.stop_btn.configure(state='disabled')
                 self.append_log('⚠  Background workers already exit , not yet collect to correct frequently Completed events ; already unlock button locked .')
@@ -13370,7 +13582,10 @@ class ABCNetworkWindow(NetworkWindow):
             lines.extend(f"  {r['source']} → {r['target']}  ({r['source_support']} source-position supports)"
                 for r in group['roads'][:150])
             with database() as con:
-                examples=con.execute('''SELECT DISTINCT c.quote FROM ssrs_road_evidence e
+                examples=con.execute('''SELECT DISTINCT c.quote FROM (
+                        SELECT src,dst,cluster_id,source_id FROM ssrs_road_evidence
+                        UNION
+                        SELECT src,dst,cluster_id,source_id FROM ssrs_cooccurrence_evidence) e
                         JOIN abc_input_clusters c ON c.id=e.cluster_id
                         JOIN ssrs_memory_group_roads gr ON gr.src=e.src AND gr.dst=e.dst
                         WHERE gr.group_id=? AND e.source_id=? LIMIT 8''',
@@ -13575,7 +13790,8 @@ class ABCNetworkWindow(NetworkWindow):
         with database() as con:
             with con:
                 for tab in ('ssrs_memory_group_roads','ssrs_memory_group_members',
-                            'ssrs_memory_groups','ssrs_road_evidence','ssrs_fast_roads',
+                            'ssrs_memory_groups','ssrs_cooccurrence_evidence',
+                            'ssrs_road_evidence','ssrs_fast_roads',
                             'ssrs_document_read_sessions','ssrs_document_reads',
                             'abc_feedback','abc_pulse_events','abc_runs','abc_cluster_links',
                             'abc_cluster_features','abc_replay_queue','abc_input_clusters',
