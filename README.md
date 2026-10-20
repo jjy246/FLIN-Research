@@ -697,6 +697,49 @@ When full text is unavailable, the system may learn from available abstracts or 
 
 ---
 
+### Understanding FLIN Network Statistics
+
+FLIN distinguishes between the complete persistent memory network and the subset currently rendered in the 3D viewer.
+
+By default, the viewer displays up to 2,200 memory units. This visualization limit does not restrict the number of memories stored or learned.
+
+**Network Statistics**
+
+- **Active Memories:** Memory units eligible for activation.
+- **Directed Links:** All directed associative connections stored in SQLite.
+- **Displayed Memories:** Memory units selected for the current 3D view.
+- **Displayed Links:** Connections whose endpoints are included in the displayed network.
+- **Isolated Memories:** Active memory units without incoming or outgoing directed connections.
+- **SSRS Fast Roads:** Existing directed connections qualified for accelerated transmission.
+- **Fast Memory Groups:** Source-supported groups constructed from qualifying fast roads.
+- **Pending Input Clusters:** Recorded inputs awaiting association processing.
+
+An active memory does not necessarily have an associative connection.
+
+A low connection-to-memory ratio is not automatically a software error. It may indicate that source inputs contain many isolated concepts, or that the evidence required for associative learning has not yet been observed.
+
+#### Network Diagnostics
+
+Run the following command to inspect the actual FLIN network:
+
+```bash
+python flin_desktop.py --display-check
+```
+
+For a detailed association audit:
+
+```bash
+python flin_desktop.py --flin-association-audit
+```
+
+These commands report connectivity, isolated memories, SSRS fast roads, input cluster statistics, and possible structural inconsistencies.
+
+Both commands are read-only.
+
+**Important:** FLIN does not create arbitrary associations to increase graph density. New connections must be supported by qualified observations.
+
+The goal is to evaluate the quality of learned associative structures, not merely maximize their number.
+
 ## 13. Database Architecture
 
 FLIN stores its persistent memory network using SQLite.
