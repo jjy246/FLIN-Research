@@ -7369,45 +7369,96 @@ def abc_graph_totals(con):
 
 
 def flin_association_health(con):
-    """Read-only evidence for distinguishing absent links from exhausted knowledge.
-
-    No hardware/UI sampling, model inference, or graph mutation. A node may be
-    active without an edge because one grounded concept suffices for formation,
-    while learned directed edges require a source-observed ordered pair.
-    """
-    active,edges=con.execute("""SELECT
+    # Read-only full-database quality and connectivity measurements.
+    active,edges=con.execute('''SELECT
         (SELECT COUNT(*) FROM abc_units WHERE status='active'),
-        (SELECT COUNT(*) FROM abc_edges)""").fetchone()
-    source_count=con.execute('SELECT COUNT(*) FROM abc_sources').fetchone()[0]
-    single,multi=con.execute("""SELECT
+        (SELECT COUNT(*) FROM abc_edges)''').fetchone()
+    isolated=con.execute('''SELECT COUNT(*) FROM abc_units u
+        WHERE u.status='active'
+        AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.src=u.id)
+        AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.dst=u.id)''').fetchone()[0]
+    bad_endpoints=con.execute('''SELECT COUNT(*) FROM abc_edges e
+        WHERE NOT EXISTS(SELECT 1 FROM abc_units u WHERE u.id=e.src AND u.status='active')
+           OR NOT EXISTS(SELECT 1 FROM abc_units u WHERE u.id=e.dst AND u.status='active')''').fetchone()[0]
+    single,multi=con.execute('''SELECT
         COALESCE(SUM(CASE WHEN n=1 THEN 1 ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN n>=2 THEN 1 ELSE 0 END),0)
-        FROM (SELECT COUNT(*) n FROM abc_cluster_features GROUP BY cluster_id)""").fetchone()
-    isolated=con.execute("""SELECT COUNT(*) FROM abc_units u
-        WHERE u.status='active' AND NOT EXISTS
-            (SELECT 1 FROM abc_edges e WHERE e.src=u.id)
-        AND NOT EXISTS (SELECT 1 FROM abc_edges e WHERE e.dst=u.id)""").fetchone()[0]
-    bad_endpoints=con.execute("""SELECT COUNT(*) FROM abc_edges e
-        WHERE NOT EXISTS (SELECT 1 FROM abc_units u WHERE u.id=e.src AND u.status='active')
-           OR NOT EXISTS (SELECT 1 FROM abc_units u WHERE u.id=e.dst AND u.status='active')""").fetchone()[0]
-    updated=con.execute('SELECT COALESCE(SUM(observations),0) FROM abc_edges').fetchone()[0]
-    diagnostics=dict(con.execute('SELECT status,COUNT(*) FROM flin_ingest_diagnostics '
-                                'GROUP BY status'))
+        FROM (SELECT COUNT(*) n FROM abc_cluster_features GROUP BY cluster_id)''').fetchone()
+    fast_roads=con.execute('SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
+    fast_groups=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+    orphan_fast_roads=con.execute('''SELECT COUNT(*) FROM ssrs_fast_roads r
+        WHERE NOT EXISTS(SELECT 1 FROM abc_edges e
+                         WHERE e.src=r.src AND e.dst=r.dst)''').fetchone()[0]
+    nonpositive_edges=con.execute('SELECT COUNT(*) FROM abc_edges WHERE weight<=0 OR weight IS NULL').fetchone()[0]
     pending=con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0]
+    updated=con.execute('SELECT COALESCE(SUM(observations),0) FROM abc_edges').fetchone()[0]
+    source_count=con.execute('SELECT COUNT(*) FROM abc_sources').fetchone()[0]
+    diagnostics=dict(con.execute('SELECT status,COUNT(*) FROM flin_ingest_diagnostics GROUP BY status'))
     cursor=con.execute("SELECT value FROM abc_meta WHERE key='flin_source_input_backfill_v3_rowid'").fetchone()
-    return {'active_memories':active,'directed_links':edges,
-            'link_observations_total':updated,'isolated_active_memories':isolated,
+    warnings=[]
+    if bad_endpoints:
+        warnings.append('Some directed links have inactive or missing endpoints.')
+    if orphan_fast_roads:
+        warnings.append('Some SSRS fast roads have no matching directed association.')
+    if pending:
+        warnings.append('Some effective input clusters remain queued for link replay.')
+    if active and isolated/active>=0.25:
+        warnings.append('At least 25% of active memories are isolated; inspect singleton clusters and source extraction before changing learning rules.')
+    if not warnings:
+        warnings.append('No structural anomaly in these checks; source quality still needs independent validation.')
+    return {'graph':'FLIN abc_units / abc_edges',
+            'active_memories':active,'directed_links':edges,
+            'links_per_active_memory':round(edges/max(1,active),4),
+            'mean_total_degree':round(2*edges/max(1,active),4),
+            'link_observations_total':updated,
+            'isolated_active_memories':isolated,
+            'connected_active_memories':max(0,active-isolated),
             'isolated_fraction':round(isolated/max(1,active),5),
+            'connected_fraction':round((active-isolated)/max(1,active),5),
             'stored_single_feature_clusters':single,
             'stored_multi_feature_clusters':multi,
             'stored_sources':source_count,'pending_link_replay':pending,
             'edges_with_inactive_or_missing_endpoint':bad_endpoints,
+            'edges_with_nonpositive_weight':nonpositive_edges,
+            'ssrs_fast_roads':fast_roads,
+            'ssrs_fast_memory_groups':fast_groups,
+            'ssrs_roads_without_association':orphan_fast_roads,
             'ingestion_statuses':diagnostics,
             'historical_link_recovery_cursor':int(cursor[0]) if cursor else 0,
-            'interpretation':('A stagnant link count does NOT prove all links were learned. '
-               'New singleton memories and source clusters can accumulate without '
-               'an observed ordered feature pair. Compare multi-feature clusters, '
-               'isolated nodes and link observations; repair cached sources incrementally.')}
+            'warnings':warnings,
+            'interpretation':('Active means eligible to trigger, not necessarily connected. '
+               'The 3D view samples at most 2,200 nodes by default; displayed links '
+               'have both endpoints in the sample. A low edge-to-node ratio alone '
+               'is not evidence of incorrect learning.')}
+
+
+def flin_display_health(con, sample_size=1000):
+    # Read-only audit for the ACTUAL FLIN graph, not the legacy units/edges.
+    result=flin_association_health(con)
+    sample_size=max(1,min(10000,int(sample_size)))
+    edges=con.execute('''SELECT src,dst FROM abc_edges
+                         ORDER BY rowid DESC LIMIT ?''',(sample_size,)).fetchall()
+    ids=sorted({node for a,b in edges for node in (a,b)})
+    found=set()
+    for start in range(0,len(ids),400):
+        part=ids[start:start+400]
+        found.update(r[0] for r in con.execute('SELECT id FROM abc_units WHERE id IN ('+
+                            ','.join('?' for _ in part)+')',part))
+    coords=con.execute('''SELECT x,y,z FROM abc_positions
+                           ORDER BY rowid DESC LIMIT ?''',(sample_size,)).fetchall()
+    result.update({
+        'database':str(con.execute('PRAGMA database_list').fetchone()[2]),
+        'display_node_limit':FAST_OVERVIEW_NODES,
+        'display_edge_limit':FAST_DRAW_EDGES,
+        'view_selection':'Top source group members and high-support active memories, with edges between sampled nodes.',
+        'sampled_edges':len(edges),
+        'sampled_edges_with_missing_node':sum(a not in found or b not in found for a,b in edges),
+        'sampled_positions':len(coords),
+        'sampled_invalid_positions':sum(not all(math.isfinite(float(v)) for v in xyz)
+                                          for xyz in coords),
+        'read_only':True,
+    })
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -13438,12 +13489,22 @@ class ABCNetworkWindow(NetworkWindow):
                     selected[uid]=dict(label=label,kind='candidate',description=definition,
                         url='',citations=0,support=evidence)
                 if len(selected)<limit:
-                    for uid,label,definition,status,evidence in con.execute(
-                          'SELECT id,label,definition,status,evidence_count FROM abc_units '
-                          "WHERE status='active' ORDER BY evidence_count DESC,rowid DESC "
-                          'LIMIT ? OFFSET ?', (limit-len(selected),active_cap)):
-                        selected[uid]=dict(label=label,kind='concept',description=definition,
-                            url='',citations=0,support=evidence)
+                    # Fill remaining positions with DISTINCT active memories.
+                    # Original OFFSET and LIMIT silently lost slots when group
+                    # members overlapped with the high-support selection.
+                    offset=0
+                    while len(selected)<limit:
+                        batch=con.execute(
+                            'SELECT id,label,definition,status,evidence_count FROM abc_units '
+                            "WHERE status='active' ORDER BY evidence_count DESC,rowid DESC "
+                            'LIMIT 250 OFFSET ?', (offset,)).fetchall()
+                        if not batch:break
+                        for uid,label,definition,status,evidence in batch:
+                            if uid not in selected:
+                                selected[uid]=dict(label=label,kind='concept',
+                                    description=definition,url='',citations=0,support=evidence)
+                            if len(selected)>=limit:break
+                        offset+=len(batch)
             if not selected:return {},[],totals,{}
             ids=list(selected)
             visible=set(ids)
@@ -13621,10 +13682,24 @@ class ABCNetworkWindow(NetworkWindow):
         try:
             previous=set(self.plot_data)
             nodes,edges,totals,all_nodes=self.get_network()
-            with database() as con:status=abc_status(con)
-            self.graph_stats.set(f"FLIN 3D: showing {len(nodes):,} memories / {len(edges):,} displayed links; "
-                                 f"all triggerable {status['active']:,}; legacy candidates {status['candidates']:,}; "
-                                 f"directed links {status['edges']:,}")
+            with database() as con:
+                status=abc_status(con)
+                isolated=con.execute('''SELECT COUNT(*) FROM abc_units u
+                    WHERE u.status='active'
+                    AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.src=u.id)
+                    AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.dst=u.id)''').fetchone()[0]
+                fast_count=con.execute('SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
+                group_count=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+                pending=con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0]
+            total_memories=status['active']+status['candidates']
+            isolated_pct=100*isolated/max(1,status['active'])
+            self.graph_stats.set(
+                f"3D sample: {len(nodes):,}/{total_memories:,} memories; "
+                f"{len(edges):,} displayed of {status['edges']:,} stored directed links.\n"
+                f"SQLite: {status['active']:,} active; {status['candidates']:,} candidates; "
+                f"{isolated:,} isolated ({isolated_pct:.1f}%); "
+                f"{fast_count:,} SSRS fast roads; {group_count:,} colored groups; "
+                f"{pending:,} queued input clusters.")
             self.counter.set(f"Source topics {status['topics']:,} / papers and Wikipedia {status['learned_sources']:,}\n"
                              f"FLIN triggerable memories {status['active']:,} / old candidates {status['candidates']:,}")
             self.network_math_count.set(f"FLIN links {status['edges']:,} | shortcuts {status['shortcuts']:,} | "
@@ -13971,7 +14046,7 @@ if __name__ == "__main__":
     parser.add_argument('--flin-retrofit',action='store_true',help='Evaluate existing SSRS input clusters for reusable shortcut memories')
     parser.add_argument('--flin-retrofit-limit',type=int,default=1000,help='Maximum existing clusters per retrofit run (default: 1000)')
     parser.add_argument('--diagnose',action='store_true',help='Run offline database and Ollama diagnostics without revealing API keys')
-    parser.add_argument('--display-check',action='store_true',help='Read-only check of graph totals and sampled missing nodes, edges, and positions')
+    parser.add_argument('--display-check',action='store_true',help='Read-only FLIN connectivity, SSRS, sample limits and graph integrity (legacy fallback)')
     parser.add_argument('--catalog-info',action='store_true',help='Show local literature catalog counts, sources, query cache, and size')
     parser.add_argument('--catalog-search',metavar='QUERY',help='Search only the local literature index; no provider API requests')
     parser.add_argument('--catalog-import-network',nargs='?',const='__ACTIVE__',metavar='SQLITE',
@@ -14147,7 +14222,13 @@ if __name__ == "__main__":
     if args.display_check:
         try:
             with contextlib.closing(_read_only_database()) as connection:
-                print(json.dumps(inspect_display_health(connection),ensure_ascii=False,indent=2))
+                tables={row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'")}
+                needed={'abc_units','abc_edges','abc_positions','ssrs_fast_roads',
+                        'ssrs_memory_groups','abc_replay_queue'}
+                check=(flin_display_health(connection) if needed.issubset(tables)
+                       else inspect_display_health(connection))
+                print(json.dumps(check,ensure_ascii=False,indent=2))
         except Exception as exc:
             print('✕  Display Diagnostics Failed :'+str(exc),file=sys.stderr)
             sys.exit(1)
