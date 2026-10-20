@@ -42,7 +42,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--ssrs-groups-report','--ssrs-rebuild-groups','--ssrs-self-test','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--ssrs-groups-report','--ssrs-rebuild-groups','--ssrs-self-test','--ssrs-dynamic-self-test','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -82,7 +82,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intelligence Network | Automatic Literature-Driven SSRS v24.0"
+APP_TITLE = "FLIN — Feature-Link Intelligence Network | Dynamic Competitive SSRS v25.0"
 
 
 def _flin_linux_cgroup_resources():
@@ -1500,7 +1500,10 @@ EXPORT_CORE_TABLES = ('units', 'edges', 'positions', 'network_meta',
                       'abc_units','abc_edges','abc_ssrs','abc_meta','ssrs_fast_roads','ssrs_road_evidence','ssrs_document_reads',
                        'abc_sources','abc_source_topics','abc_topics','abc_positions',
                        'ssrs_memory_groups','ssrs_memory_group_members','ssrs_memory_group_roads',
-                       'ssrs_cooccurrence_evidence')
+                       'ssrs_cooccurrence_evidence','ssrs_fast_road_state',
+                       'ssrs_dynamic_groups','ssrs_dynamic_group_members',
+                       'ssrs_dynamic_group_roads','ssrs_dynamic_group_sources',
+                       'ssrs_dynamic_proposals','ssrs_dynamic_events','ssrs_dynamic_update_runs')
 EXPORT_PROVENANCE_TABLES = (
     'theories', 'papers', 'paper_theories', 'paper_math_applications', 'mentions', 'relation_evidence',
     'unit_terms', 'wikipedia_references', 'wikipedia_reference_scans',
@@ -6628,6 +6631,47 @@ def abc_schema(con):
           source_support INTEGER NOT NULL,
           PRIMARY KEY(group_id,src,dst)
         );
+        CREATE TABLE IF NOT EXISTS ssrs_fast_road_state(
+          src TEXT NOT NULL, dst TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('candidate','active','dormant')),
+          current_score REAL NOT NULL DEFAULT 0, score_window_id TEXT NOT NULL DEFAULT '',
+          last_change_run INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(src,dst));
+        CREATE INDEX IF NOT EXISTS idx_dyn_road_state ON ssrs_fast_road_state(status,src);
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_groups(
+          group_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
+          color TEXT NOT NULL, cohesion REAL NOT NULL DEFAULT 0,
+          separation REAL NOT NULL DEFAULT 0, created_run INTEGER NOT NULL,
+          updated_run INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1);
+        CREATE INDEX IF NOT EXISTS idx_dyn_groups_status ON ssrs_dynamic_groups(status);
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_group_members(
+          group_id TEXT NOT NULL, unit_id TEXT NOT NULL, affinity REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active', last_confirmed_run INTEGER NOT NULL,
+          PRIMARY KEY(group_id,unit_id));
+        CREATE INDEX IF NOT EXISTS idx_dyn_members_unit ON ssrs_dynamic_group_members(unit_id);
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_group_roads(
+          group_id TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL,
+          support INTEGER NOT NULL, qualification_state TEXT NOT NULL,
+          PRIMARY KEY(group_id,src,dst));
+        CREATE INDEX IF NOT EXISTS idx_dyn_grp_road_pair ON ssrs_dynamic_group_roads(src,dst);
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_group_sources(
+          group_id TEXT NOT NULL, source_id TEXT NOT NULL,
+          distinct_clusters INTEGER NOT NULL, source_support INTEGER NOT NULL,
+          PRIMARY KEY(group_id,source_id));
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_proposals(
+          proposal_id TEXT PRIMARY KEY, signature TEXT NOT NULL,
+          candidate_json TEXT NOT NULL, delta_score REAL NOT NULL,
+          consecutive_votes INTEGER NOT NULL, last_new_input_seq INTEGER NOT NULL,
+          state TEXT NOT NULL DEFAULT 'pending');
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_events(
+          event_id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL,
+          change_type TEXT NOT NULL, old_groups_json TEXT NOT NULL,
+          new_groups_json TEXT NOT NULL, reason_json TEXT NOT NULL,
+          created TEXT DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS ssrs_dynamic_update_runs(
+          run_id INTEGER PRIMARY KEY AUTOINCREMENT, input_watermark INTEGER NOT NULL UNIQUE,
+          window_id TEXT NOT NULL, seed INTEGER NOT NULL, algorithm TEXT NOT NULL,
+          parameters_json TEXT NOT NULL, finished_at TEXT DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS ssrs_document_reads(
           document_id TEXT PRIMARY KEY, filename TEXT NOT NULL,
           file_sha256 TEXT NOT NULL, content_chars INTEGER NOT NULL,
@@ -7384,8 +7428,11 @@ def flin_association_health(con):
         COALESCE(SUM(CASE WHEN n=1 THEN 1 ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN n>=2 THEN 1 ELSE 0 END),0)
         FROM (SELECT COUNT(*) n FROM abc_cluster_features GROUP BY cluster_id)''').fetchone()
-    fast_roads=con.execute('SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
-    fast_groups=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+    ready=flin_ssrs_dynamic_ready(con)
+    fast_roads=con.execute("SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'" if ready
+                           else 'SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
+    fast_groups=con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'" if ready
+                            else 'SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
     orphan_fast_roads=con.execute('''SELECT COUNT(*) FROM ssrs_fast_roads r
         WHERE NOT EXISTS(SELECT 1 FROM abc_edges e
                          WHERE e.src=r.src AND e.dst=r.dst)''').fetchone()[0]
@@ -7563,11 +7610,489 @@ def flin_ssrs_promote_source_cooccurrences(con, source_id):
             'new_fast_roads':formed,'source_votes':votes}
 
 
+# v25 Dynamic Competitive SSRS: values are experimental, not biological constants.
+SSRS_DYNAMIC_ALPHA = 0.70
+SSRS_DYNAMIC_JOIN_ABS = 0.25
+SSRS_DYNAMIC_JOIN_REL = 0.65
+SSRS_DYNAMIC_ACTIVATE = 0.70
+SSRS_DYNAMIC_DEACTIVATE = 0.50
+SSRS_DYNAMIC_CONFIRM_WINDOWS = 3
+SSRS_DYNAMIC_RECENT_CLUSTERS = 200
+SSRS_DYNAMIC_COOLDOWN_NEW_CLUSTERS = 30
+SSRS_DYNAMIC_LEIDEN_SEED = 42
+SSRS_DYNAMIC_MAX_LOCAL_NODES = 800
+SSRS_DYNAMIC_MAX_LOCAL_EDGES = 2200
+
+
+def flin_ssrs_dynamic_ready(con):
+    row=con.execute("SELECT value FROM abc_meta WHERE key='ssrs_dynamic_schema_version'").fetchone()
+    return bool(row and row[0]=='25')
+
+
+def flin_ssrs_active_roads_sql(con):
+    """SQL table name returned only after an atomic v25 snapshot is published."""
+    return ('ssrs_fast_road_state' if flin_ssrs_dynamic_ready(con)
+            else 'ssrs_fast_roads')
+
+
+def _flin_ssrs_group_color(gid):
+    hue=int(hashlib.sha256(gid.encode()).hexdigest()[:8],16)/0xffffffff
+    rgb=colorsys.hsv_to_rgb(hue,.75,.96)
+    return '#'+''.join(f'{int(x*255):02x}' for x in rgb)
+
+
+def _flin_ssrs_group_score(graph, members, partition):
+    """Bounded overlapping objective: cohesion + separation - size/overlap costs."""
+    members=set(members)
+    if len(members)<2:return -1.
+    inside=sum(d['weight'] for a,b,d in graph.edges(data=True) if a in members and b in members)
+    outside=sum(d['weight'] for a,b,d in graph.edges(data=True) if (a in members)!=(b in members))
+    density=2*inside/max(1,len(members)*(len(members)-1))
+    separation=inside/max(1e-9,inside+outside)
+    return density+.4*separation-.008*len(members)
+
+
+def _flin_ssrs_communities(graph):
+    """Seeded Leiden if available, otherwise deterministic NetworkX Louvain.
+
+    Both output disjoint *cores*, followed by source-grounded overlap expansion.
+    """
+    if graph.number_of_edges()==0:return [],'none'
+    groups=None; algorithm='networkx-louvain'
+    try:
+        import igraph as ig
+        import leidenalg
+        nodes=sorted(graph.nodes)
+        index={u:i for i,u in enumerate(nodes)}
+        edges=[(index[a],index[b]) for a,b in graph.edges]
+        weights=[float(graph[a][b]['weight']) for a,b in graph.edges]
+        igraph=ig.Graph(n=len(nodes),edges=edges,directed=False)
+        result=leidenalg.find_partition(igraph,leidenalg.RBConfigurationVertexPartition,
+                     weights=weights,seed=SSRS_DYNAMIC_LEIDEN_SEED,resolution_parameter=1.0)
+        groups=[set(nodes[i] for i in part) for part in result]
+        algorithm='weighted-leiden'
+    except ImportError:
+        try:
+            groups=[set(x) for x in nx.algorithms.community.louvain_communities(
+                graph,weight='weight',seed=SSRS_DYNAMIC_LEIDEN_SEED,resolution=1.0)]
+        except (AttributeError,ValueError):
+            groups=[set(x) for x in nx.algorithms.community.greedy_modularity_communities(
+                graph,weight='weight')]
+            algorithm='greedy-modularity-fallback'
+    return [g for g in groups if len(g)>1],algorithm
+
+
+def flin_ssrs_dynamic_update(con, changed_sources=(), *, force=False):
+    """Non-destructive, source-grounded dynamic SSRS update.
+
+    Idempotent on input-cluster ROWID watermark. A local, bounded candidate
+    network uses real existing directed roads; community projection is undirected
+    only for partitioning. All group/status changes publish in one transaction.
+    """
+    abc_schema(con)
+    # Must NEVER treat refreshes, simulations or reprocessed identical papers as
+    # new independent votes. Newly inserted cluster rows are the update clock.
+    watermark=int(con.execute('SELECT COALESCE(MAX(rowid),0) FROM abc_input_clusters').fetchone()[0])
+    previous=con.execute('SELECT COALESCE(MAX(input_watermark),0) FROM ssrs_dynamic_update_runs').fetchone()[0]
+    if watermark<=previous:
+        return {'updated':False,'reason':'no new effective input','watermark':watermark}
+    # Gather the most recent distinct source-grounded input events, but preserve
+    # previously grouped neighborhoods.  Source caps prevent accidental quadratic
+    # full-graph scans in 20k+ memory databases.
+    rows=con.execute('''SELECT c.id,c.paper_id,f.unit_id,c.rowid FROM (
+        SELECT id,paper_id,rowid FROM abc_input_clusters
+        ORDER BY rowid DESC LIMIT ?) c
+        JOIN abc_cluster_features f ON f.cluster_id=c.id
+        JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
+        ORDER BY c.rowid DESC''',(SSRS_DYNAMIC_RECENT_CLUSTERS,)).fetchall()
+    recent=defaultdict(lambda:defaultdict(set))
+    # Compute the changed local neighborhood, not every unrelated old group.
+    candidates=set()
+    for cid,sid,uid,seq in rows:
+        recent[sid][uid].add(cid)
+        if seq>previous:
+            candidates.add(uid)
+    if not candidates and force:
+        candidates={uid for sid in changed_sources for uid in recent.get(sid,{})}
+    all_groups=defaultdict(set)
+    for gid,uid in con.execute('''SELECT m.group_id,m.unit_id FROM ssrs_dynamic_group_members m
+        JOIN ssrs_dynamic_groups g ON g.group_id=m.group_id WHERE g.status='active' '''):
+        all_groups[gid].add(uid)
+    changed=set(map(str,changed_sources or ()))
+    # Only groups actually intersecting the newly observed memories may change.
+    seed=set(candidates)
+    previous_groups={gid:members for gid,members in all_groups.items()
+                     if members & seed}
+    for members in previous_groups.values():
+        candidates.update(members)
+    # For large systems, preserve *whole* groups from the current neighborhood
+    # and bound additional nodes rather than silently truncating group identity.
+    if len(candidates)>SSRS_DYNAMIC_MAX_LOCAL_NODES:
+        candidates=seed & candidates
+        candidates=set(sorted(candidates)[:SSRS_DYNAMIC_MAX_LOCAL_NODES])
+        for members in previous_groups.values():
+            if members & candidates and len(candidates|members)<=SSRS_DYNAMIC_MAX_LOCAL_NODES:
+                candidates.update(members)
+    # Fail closed instead of truncating an existing group or applying a
+    # partial partition. Retry when a smaller input batch is processed.
+    if len(candidates)>SSRS_DYNAMIC_MAX_LOCAL_NODES or any(
+            len(group & candidates)<len(group) for group in previous_groups.values()):
+        return {'updated':False,'deferred':True,'reason':'local community exceeds safe update budget',
+                'affected_memories':len(candidates),'watermark':watermark}
+    if not candidates:
+        with con:
+            con.execute('''INSERT OR IGNORE INTO ssrs_dynamic_update_runs
+                (input_watermark,window_id,seed,algorithm,parameters_json)
+                VALUES(?,?,?,?,?)''',(watermark,str(watermark),SSRS_DYNAMIC_LEIDEN_SEED,
+                        'empty', '{}'))
+            con.execute("INSERT OR REPLACE INTO abc_meta VALUES('ssrs_dynamic_schema_version','25')")
+        return {'updated':True,'groups':0,'active_roads':0,'watermark':watermark}
+    ids=sorted(candidates)
+    # Include only explicitly observed directed roads with a matching ordinary edge.
+    road_rows=[]
+    for i in range(0,len(ids),180):
+        part=ids[i:i+180]
+        road_rows.extend(con.execute('''SELECT r.src,r.dst,r.support,e.weight,e.observations,
+            COALESCE(sa.exposures,0),COALESCE(sb.exposures,0)
+            FROM ssrs_fast_roads r JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
+            JOIN abc_units a ON a.id=r.src AND a.status='active'
+            JOIN abc_units b ON b.id=r.dst AND b.status='active'
+            LEFT JOIN abc_ssrs sa ON sa.unit_id=r.src
+            LEFT JOIN abc_ssrs sb ON sb.unit_id=r.dst
+            WHERE r.src IN ('''+','.join('?' for _ in part)+''')
+            ORDER BY r.support DESC LIMIT ?''', (*part,SSRS_DYNAMIC_MAX_LOCAL_EDGES)))
+    road_rows=[r for r in road_rows if r[1] in candidates]
+    # Old simulations could persist SSRS roads without external documents. The
+    # dynamic layer only admits roads supported by >=2 independent input clusters.
+    verified=set()
+    for src,dst,*_ in road_rows:
+        count=con.execute('''SELECT COUNT(*) FROM (
+            SELECT cluster_id FROM ssrs_road_evidence WHERE src=? AND dst=?
+            UNION SELECT cluster_id FROM ssrs_cooccurrence_evidence WHERE src=? AND dst=?)''',
+            (src,dst,src,dst)).fetchone()[0]
+        # Recovery of older v24 networks: real source clusters support a road
+        # even when provenance tables predate the newer auto-cooccurrence pass.
+        if count<SSRS_EVIDENCE_MIN_CLUSTERS:
+            count=con.execute('''SELECT COUNT(DISTINCT f.cluster_id)
+                FROM abc_cluster_features f JOIN abc_cluster_features g
+                ON f.cluster_id=g.cluster_id WHERE f.unit_id=? AND g.unit_id=?''',
+                (src,dst)).fetchone()[0]
+        if count>=SSRS_EVIDENCE_MIN_CLUSTERS:verified.add((src,dst))
+    road_rows=[r for r in road_rows if (r[0],r[1]) in verified]
+    road_rows.sort(key=lambda r:(-r[2],r[0],r[1]))
+    road_rows=road_rows[:SSRS_DYNAMIC_MAX_LOCAL_EDGES]
+    road_dict={(r[0],r[1]):r for r in road_rows}
+    graph=nx.Graph()
+    # Assemble support counts per source from recent clusters, not repeated
+    # literature collection or pulse-derived events.
+    source_count=defaultdict(int)
+    source_pair=defaultdict(int)
+    for sid,features in recent.items():
+        src_nodes=set(features)
+        for a,b in road_dict:
+            if a in src_nodes or b in src_nodes:
+                source_count[(sid,a)]=len(features.get(a,()))
+                source_count[(sid,b)]=len(features.get(b,()))
+                source_pair[(sid,tuple(sorted((a,b))))]=len(features.get(a,set()) & features.get(b,set()))
+    scored={}
+    for (a,b),(_,_,support,w,observations,ea,eb) in road_dict.items():
+        if float(w)<SSRS_EVIDENCE_MIN_WEIGHT or observations<SSRS_EVIDENCE_MIN_CLUSTERS or min(ea,eb)<SSRS_EVIDENCE_MIN_EXPOSURES or support<SSRS_EVIDENCE_MIN_CLUSTERS:
+            continue
+        source_scores=[]
+        for sid in recent:
+            ma=source_count.get((sid,a),0);mb=source_count.get((sid,b),0)
+            if ma>0 or mb>0:
+                co=source_pair.get((sid,tuple(sorted((a,b)))),0)
+                source_scores.append(co/math.sqrt(ma*mb) if ma>0 and mb>0 else 0.)
+        overlap=sum(source_scores)/len(source_scores) if source_scores else 0.
+        # Directional observation strength is bounded in [0,1] and deliberately
+        # independent of pulse traffic and page citations.
+        directional=min(1.,observations/3.)
+        h=min(1.,support/2.)
+        # Distinct corroborating clusters add reliability, without changing
+        # any original edge weight or double-counting unordered/order evidence.
+        reliability=.16*min(1.,max(0,support-2)/2.)
+        score=h*(SSRS_DYNAMIC_ALPHA*overlap+(1-SSRS_DYNAMIC_ALPHA)*directional)+reliability
+        scored[(a,b)]=max(0.,min(1.,score))
+        # Weak bridges never become structural evidence merely by being connected.
+        if score>=.25:
+            if graph.has_edge(a,b):
+                graph[a][b]['weight']=max(graph[a][b]['weight'],score)
+            else:graph.add_edge(a,b,weight=score)
+    cores,algorithm=_flin_ssrs_communities(graph)
+    communities=[]
+    for core in cores:
+        members=set(core)
+        for uid in sorted(graph):
+            if uid in members:continue
+            neighbors=graph[uid]
+            total=sum(d['weight'] for d in neighbors.values())
+            inside=sum(d['weight'] for v,d in neighbors.items() if v in core)
+            frac=inside/max(total,1e-9)
+            # Candidate can participate in more than one cluster, but only when
+            # supported by a true directed road (not invented projected edges).
+            # A single bridge may support a separate fast pair, but it MUST NOT
+            # absorb a node into an entire existing community. Require two
+            # independently qualified neighbor relationships for expansion.
+            strong_neighbors={v for v in core if max(scored.get((uid,v),0.),
+                                 scored.get((v,uid),0.))>=SSRS_DYNAMIC_DEACTIVATE}
+            if (frac>=SSRS_DYNAMIC_JOIN_ABS and inside>0 and
+                    len(strong_neighbors)>=2):
+                best=max((sum(d['weight'] for v,d in graph[x].items() if v in other)/
+                          max(sum(d['weight'] for d in graph[x].values()),1e-9)
+                          for other in cores for x in (uid,)), default=0)
+                if frac>=SSRS_DYNAMIC_JOIN_REL*best:
+                    expanded=members|{uid}
+                    if _flin_ssrs_group_score(graph,expanded,cores)>=.13:
+                        members.add(uid)
+        internal={(a,b) for a,b in scored if a in members and b in members and scored[a,b]>=SSRS_DYNAMIC_DEACTIVATE}
+        if internal and _flin_ssrs_group_score(graph,members,cores)>=.13:
+            communities.append((members,internal))
+    # Strong independently observed bridges may become their own overlapping
+    # group rather than forcing both original communities to merge. A bridge
+    # must dominate each endpoint's older intra-group road support; a single
+    # weak bridge is never sufficient. This is a *group*, not a new graph edge.
+    for (a,b),score in sorted(scored.items()):
+        if score<SSRS_DYNAMIC_ACTIVATE:continue
+        ga={gid for gid,ms in previous_groups.items() if a in ms}
+        gb={gid for gid,ms in previous_groups.items() if b in ms}
+        if not ga or not gb or ga&gb:continue
+        count=road_dict[a,b][2]
+        # Verify source-grounded independent observations from stored clusters.
+        repeat=con.execute('''SELECT COUNT(DISTINCT f.cluster_id)
+            FROM abc_cluster_features f JOIN abc_cluster_features g
+            ON f.cluster_id=g.cluster_id
+            WHERE f.unit_id=? AND g.unit_id=?''',(a,b)).fetchone()[0]
+        if repeat<SSRS_DYNAMIC_CONFIRM_WINDOWS:continue
+        def internal_support(node, groups):
+            return max((row[2] for (x,y),row in road_dict.items()
+                if node in (x,y) and any(x in previous_groups[gid]
+                    and y in previous_groups[gid] for gid in groups)),default=0)
+        stronger=count>=1.2*max(1,internal_support(a,ga),internal_support(b,gb))
+        if stronger and (a,b) in scored:
+            communities.append(({a,b},{(a,b)}))
+    # Deduplicate identical overlapping groups, keep smallest stable lexical core.
+    unique={tuple(sorted(m)):(m,r) for m,r in communities}
+    communities=sorted(unique.values(),key=lambda x:(-len(x[0]),tuple(sorted(x[0]))))
+    current_sets=sorted([tuple(sorted(x)) for x in previous_groups.values()])
+    new_sets=sorted([tuple(sorted(m)) for m,r in communities])
+    changed_structure=current_sets!=new_sets
+    old_quality=sum(_flin_ssrs_group_score(graph,m,cores)
+                    for m in previous_groups.values())
+    new_quality=sum(_flin_ssrs_group_score(graph,m,cores)
+                    for m,r in communities)
+    delta_quality=new_quality-old_quality
+    # Genuine splits/merges need a positive, auditable improvement.
+    required_gain=(.12 if len(communities)<len(previous_groups) else .08)
+    # Match slowly drifting proposals by overlap rather than exact node lists.
+    # A small membership change should not reset a legitimate three-window vote.
+    def proposal_similarity(left,right):
+        if len(left)!=len(right) or not left:return 0.
+        totals=[]
+        for group in left:
+            x=set(group)
+            totals.append(max((len(x&set(y))/len(x|set(y))
+                for y in right if x|set(y)),default=0.))
+        return min(totals) if totals else 0.
+    # Independent evidence intervals—not repeated screen redraws—cast votes.
+    signature=hashlib.sha256(json.dumps(new_sets).encode()).hexdigest()[:32]
+    params={'alpha':SSRS_DYNAMIC_ALPHA,'activate':SSRS_DYNAMIC_ACTIVATE,
+        'deactivate':SSRS_DYNAMIC_DEACTIVATE,'confirm':SSRS_DYNAMIC_CONFIRM_WINDOWS,
+        'overlapping':True}
+    with con:
+        run=con.execute('''INSERT INTO ssrs_dynamic_update_runs
+            (input_watermark,window_id,seed,algorithm,parameters_json)
+            VALUES(?,?,?,?,?)''',(watermark,f'latest-{SSRS_DYNAMIC_RECENT_CLUSTERS}:{watermark}',
+                        SSRS_DYNAMIC_LEIDEN_SEED,algorithm,json.dumps(params)))
+        run_id=run.lastrowid
+        existing=len(previous_groups)  # unaffected old groups must remain active
+        votes=1
+        if changed_structure and existing:
+            proposals=con.execute('''SELECT proposal_id,candidate_json,consecutive_votes,last_new_input_seq
+                FROM ssrs_dynamic_proposals WHERE state='pending' AND signature NOT LIKE 'road:%' ''').fetchall()
+            similar=[]
+            for pid,body,n,seq in proposals:
+                try:similarity=proposal_similarity(json.loads(body),new_sets)
+                except (TypeError,ValueError):similarity=0.
+                if similarity>=.75:similar.append((similarity,n,pid,seq))
+            if similar:
+                _,n,proposal_id,seq=max(similar)
+                votes=n+1 if watermark>seq else n
+            else:
+                proposal_id=signature
+            con.execute("UPDATE ssrs_dynamic_proposals SET state='superseded' WHERE state='pending' AND proposal_id<>? AND signature NOT LIKE 'road:%'",(proposal_id,))
+            con.execute('''INSERT INTO ssrs_dynamic_proposals
+                (proposal_id,signature,candidate_json,delta_score,consecutive_votes,last_new_input_seq,state)
+                VALUES(?,?,?,?,?,?,'pending') ON CONFLICT(proposal_id) DO UPDATE SET
+                signature=excluded.signature,candidate_json=excluded.candidate_json,
+                delta_score=excluded.delta_score,consecutive_votes=excluded.consecutive_votes,
+                last_new_input_seq=excluded.last_new_input_seq,state='pending' ''',
+                (proposal_id,signature,json.dumps(new_sets),delta_quality,votes,watermark))
+        last_change=con.execute('''SELECT r.input_watermark FROM ssrs_dynamic_events ev
+             JOIN ssrs_dynamic_update_runs r ON r.run_id=ev.run_id
+             WHERE ev.change_type='repartition' ORDER BY ev.event_id DESC LIMIT 1''').fetchone()
+        cooled=(not last_change or watermark-last_change[0]>=SSRS_DYNAMIC_COOLDOWN_NEW_CLUSTERS)
+        # New disconnected communities can bootstrap. Existing groups wait for
+        # independent evidence windows, improvement and restructuring cooldown.
+        approve=(not changed_structure or existing==0 or
+                 (votes>=SSRS_DYNAMIC_CONFIRM_WINDOWS and
+                  delta_quality>=required_gain and cooled))
+        if changed_structure and approve:
+            # Stable ID and color follow the best Jaccard successor. Additional
+            # split components receive fresh IDs while removed groups archive.
+            available=set(previous_groups)
+            assigned=[]
+            for members,roads in communities:
+                candidates_match=sorted((len(members&old)/len(members|old),gid)
+                         for gid,old in previous_groups.items() if gid in available)
+                best=max(candidates_match,default=(0.,''))
+                if best[0]>=.45:
+                    gid=best[1];available.remove(gid)
+                else:gid='ssrs-dynamic:'+uuid.uuid4().hex
+                assigned.append((gid,members,roads))
+            old_groups={gid:sorted(m) for gid,m in previous_groups.items()}
+            for old_gid in previous_groups:
+                con.execute("UPDATE ssrs_dynamic_groups SET status='archived',updated_run=? WHERE group_id=?",(run_id,old_gid))
+            for gid,members,roads in assigned:
+                score=_flin_ssrs_group_score(graph,members,cores)
+                con.execute('''INSERT INTO ssrs_dynamic_groups(group_id,title,status,color,cohesion,separation,created_run,updated_run,version)
+                    VALUES(?,?,'active',?,?,?, ?,?,1)
+                    ON CONFLICT(group_id) DO UPDATE SET status='active',cohesion=excluded.cohesion,
+                    separation=excluded.separation,updated_run=excluded.updated_run,version=version+1''',
+                    (gid,'Dynamic SSRS · '+', '.join(
+                         label[0][:28] for uid in sorted(members)[:2]
+                         if (label:=con.execute('SELECT label FROM abc_units WHERE id=?',(uid,)).fetchone())),
+                     _flin_ssrs_group_color(gid),score,score,run_id,run_id))
+                con.execute('DELETE FROM ssrs_dynamic_group_members WHERE group_id=?',(gid,))
+                con.execute('DELETE FROM ssrs_dynamic_group_roads WHERE group_id=?',(gid,))
+                con.execute('DELETE FROM ssrs_dynamic_group_sources WHERE group_id=?',(gid,))
+                con.executemany('''INSERT INTO ssrs_dynamic_group_members(group_id,unit_id,affinity,last_confirmed_run)
+                    VALUES(?,?,?,?)''',[(gid,u,1.,run_id) for u in sorted(members)])
+                con.executemany('''INSERT INTO ssrs_dynamic_group_roads(group_id,src,dst,support,qualification_state)
+                    VALUES(?,?,?,?,?)''',[(gid,a,b,road_dict[a,b][2],'active' if scored[a,b]>=SSRS_DYNAMIC_ACTIVATE else 'candidate')
+                                      for a,b in sorted(roads)])
+                for sid,features in recent.items():
+                    present=set(features)&members
+                    if present:
+                        count=len(set().union(*(features[u] for u in present)))
+                        con.execute('''INSERT INTO ssrs_dynamic_group_sources
+                            (group_id,source_id,distinct_clusters,source_support) VALUES(?,?,?,?)''',
+                            (gid,sid,count,len(present)))
+            con.execute('''INSERT INTO ssrs_dynamic_events
+                (run_id,change_type,old_groups_json,new_groups_json,reason_json) VALUES(?,?,?,?,?)''',
+                (run_id,'bootstrap' if existing==0 else 'repartition',json.dumps(old_groups),
+                 json.dumps({gid:sorted(m) for gid,m,r in assigned}),
+                 json.dumps({'algorithm':algorithm,'votes':votes,'watermark':watermark})))
+            con.execute("UPDATE ssrs_dynamic_proposals SET state='committed' WHERE signature=?",(signature,))
+        # Publish road eligibility against COMMITTED overlapping groups only.
+        # Qualification votes are independently source-watermarked (not pulses).
+        group_road_pairs=set(con.execute('''SELECT DISTINCT r.src,r.dst
+             FROM ssrs_dynamic_group_roads r JOIN ssrs_dynamic_groups g
+             ON g.group_id=r.group_id AND g.status='active' '''))
+        for (a,b),score in scored.items():
+            old=con.execute('SELECT status FROM ssrs_fast_road_state WHERE src=? AND dst=?',(a,b)).fetchone()
+            prior=old[0] if old else 'candidate'
+            backed=(a,b) in group_road_pairs
+            if not backed:
+                # A split/merge itself passed structural confirmation already.
+                status='dormant' if prior in ('active','dormant') else 'candidate'
+            elif score>=SSRS_DYNAMIC_ACTIVATE:
+                status='active'
+                con.execute('''UPDATE ssrs_dynamic_proposals SET state='superseded'
+                    WHERE signature=? AND state='pending' ''',('road:'+a+'|'+b,))
+            elif prior=='active' and score>=SSRS_DYNAMIC_DEACTIVATE:
+                status='active'  # hysteresis band
+                # A recovered road resets an incomplete demotion vote sequence.
+                con.execute("UPDATE ssrs_dynamic_proposals SET state='superseded' WHERE proposal_id=? AND state='pending'",
+                            ('road:'+a+'|'+b,))
+            elif prior=='active':
+                # Road downgrade requires three DISTINCT new-input update windows.
+                sig='road:'+a+'|'+b
+                record=con.execute('''SELECT consecutive_votes,last_new_input_seq
+                    FROM ssrs_dynamic_proposals WHERE proposal_id=? AND state='pending' ''',(sig,)).fetchone()
+                nv=(record[0]+1 if record and watermark>record[1] else 1)
+                con.execute('''INSERT INTO ssrs_dynamic_proposals
+                    (proposal_id,signature,candidate_json,delta_score,consecutive_votes,last_new_input_seq,state)
+                    VALUES(?,?,?,?,?,?,'pending')
+                    ON CONFLICT(proposal_id) DO UPDATE SET
+                    candidate_json=excluded.candidate_json,consecutive_votes=excluded.consecutive_votes,
+                    last_new_input_seq=excluded.last_new_input_seq,state='pending' ''',
+                    (sig,sig,json.dumps({'src':a,'dst':b,'score':score}),score-SSRS_DYNAMIC_DEACTIVATE,nv,watermark))
+                last=con.execute('''SELECT r.input_watermark FROM ssrs_dynamic_events ev
+                    JOIN ssrs_dynamic_update_runs r ON r.run_id=ev.run_id
+                    WHERE ev.change_type='repartition' ORDER BY ev.event_id DESC LIMIT 1''').fetchone()
+                cooled=not last or watermark-last[0]>=SSRS_DYNAMIC_COOLDOWN_NEW_CLUSTERS
+                status='dormant' if nv>=SSRS_DYNAMIC_CONFIRM_WINDOWS and cooled else 'active'
+                if status=='dormant':
+                    con.execute("UPDATE ssrs_dynamic_proposals SET state='committed' WHERE proposal_id=?",(sig,))
+                    con.execute('''INSERT INTO ssrs_dynamic_events(run_id,change_type,old_groups_json,new_groups_json,reason_json)
+                        VALUES(?,'road_demotion','{}','{}',?)''',
+                        (run_id,json.dumps({'src':a,'dst':b,'score':score,'votes':nv})))
+            else:
+                status='dormant' if prior=='dormant' else 'candidate'
+            if status=='active' and not backed:
+                status='dormant'
+            con.execute('''INSERT INTO ssrs_fast_road_state
+                (src,dst,status,current_score,score_window_id,last_change_run)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(src,dst) DO UPDATE SET
+                status=excluded.status,current_score=excluded.current_score,
+                score_window_id=excluded.score_window_id,last_change_run=CASE
+                WHEN status<>excluded.status THEN excluded.last_change_run ELSE last_change_run END''',
+                (a,b,status,score,str(watermark),run_id))
+            con.execute('''UPDATE ssrs_dynamic_group_roads SET qualification_state=?
+                WHERE src=? AND dst=? AND group_id IN
+                    (SELECT group_id FROM ssrs_dynamic_groups WHERE status='active')''',
+                ('active' if status=='active' else 'candidate',a,b))
+        # A completed structural change may withdraw the last supporting group
+        # for a previously active road. No deletion of original directed edges.
+        for a,b in con.execute("SELECT src,dst FROM ssrs_fast_road_state WHERE status='active'"):
+            if (a,b) not in group_road_pairs:
+                con.execute("UPDATE ssrs_fast_road_state SET status='dormant',last_change_run=? WHERE src=? AND dst=?",(run_id,a,b))
+        # Archive an empty group while retaining members, provenance and history.
+        for (gid,) in con.execute("SELECT group_id FROM ssrs_dynamic_groups WHERE status='active'"):
+            if not con.execute('''SELECT 1 FROM ssrs_dynamic_group_roads r JOIN ssrs_fast_road_state st
+                ON st.src=r.src AND st.dst=r.dst AND st.status='active'
+                WHERE r.group_id=? LIMIT 1''',(gid,)).fetchone():
+                con.execute("UPDATE ssrs_dynamic_groups SET status='archived',updated_run=? WHERE group_id=?",(run_id,gid))
+                con.execute('''INSERT INTO ssrs_dynamic_events(run_id,change_type,old_groups_json,new_groups_json,reason_json)
+                    VALUES(?,'group_dormant',?,'{}','{}')''',(run_id,json.dumps([gid])))
+        con.execute("INSERT OR REPLACE INTO abc_meta VALUES('ssrs_dynamic_schema_version','25')")
+    return {'updated':True,'watermark':watermark,'algorithm':algorithm,
+       'committed':approve,'votes':votes,'candidate_groups':len(communities),
+       'groups':con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0],
+       'active_roads':con.execute("SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'").fetchone()[0]}
+
+
+def flin_ssrs_dynamic_list_groups(con, *, limit=80, include_members=True):
+    result=[]
+    for gid,title,color,cohesion in con.execute('''SELECT group_id,title,color,cohesion
+        FROM ssrs_dynamic_groups WHERE status='active' ORDER BY cohesion DESC,group_id LIMIT ?''',
+        (max(1,min(500,int(limit))),)):
+        items={'id':gid,'source_id':'multi-source','title':title,'color':color,
+               'support':0,'node_count':0,'road_count':0,'cohesion':round(cohesion,4)}
+        members=con.execute('''SELECT m.unit_id,u.label,m.affinity FROM ssrs_dynamic_group_members m
+           JOIN abc_units u ON u.id=m.unit_id WHERE m.group_id=? ORDER BY m.affinity DESC,u.label''',(gid,)).fetchall()
+        roads=con.execute('''SELECT r.src,r.dst,r.support,a.label,b.label
+           FROM ssrs_dynamic_group_roads r JOIN abc_units a ON a.id=r.src
+           JOIN abc_units b ON b.id=r.dst WHERE r.group_id=? ORDER BY r.support DESC''',(gid,)).fetchall()
+        items['node_count']=len(members);items['road_count']=len(roads)
+        items['support']=sum(r[2] for r in roads)
+        if include_members:
+            items['members']=[dict(id=u,label=label,mentions=round(aff,3)) for u,label,aff in members]
+            items['roads']=[dict(src=a,dst=b,source_support=n,source=al,target=bl)
+                            for a,b,n,al,bl in roads]
+        items['sources']=[dict(source_id=sid,clusters=n) for sid,n in con.execute('''
+            SELECT source_id,distinct_clusters FROM ssrs_dynamic_group_sources
+            WHERE group_id=? ORDER BY distinct_clusters DESC LIMIT 20''',(gid,))]
+        result.append(items)
+    return result
+
 def flin_ssrs_auto_update_source(con, source_id):
     """Single automatic learning hook for papers, Wikipedia, and cached input."""
     evidence=flin_ssrs_promote_source_cooccurrences(con,source_id)
-    groups=flin_ssrs_group_rebuild(con,source_id)
-    return {**evidence,**groups}
+    groups=flin_ssrs_group_rebuild(con,source_id)  # preserved source provenance
+    dynamic=flin_ssrs_dynamic_update(con,(source_id,))
+    return {**evidence,**groups,'dynamic':dynamic}
 
 
 def flin_ssrs_group_rebuild(con, source_id):
@@ -7666,6 +8191,8 @@ def flin_ssrs_list_groups(con, *, source_id=None, limit=80, include_members=True
         g.road_count,g.support FROM ssrs_memory_groups g '''+where+
         ' ORDER BY g.support DESC,g.node_count DESC,g.id LIMIT ?',
         params+(max(1,min(400,int(limit))),)).fetchall()
+    if source_id is None and flin_ssrs_dynamic_ready(con):
+        return flin_ssrs_dynamic_list_groups(con,limit=limit,include_members=include_members)
     items=[]
     for gid,sid,title,color,nodes,roads,support in rows:
         result={'id':gid,'source_id':sid,'title':title,'color':color,
@@ -8220,6 +8747,20 @@ def flin_ssrs_report(con, limit=150, *, source_id=None):
               'candidate_links': 0, 'candidate_sample': [],
               'document_clusters_total': 0, 'document_memories_total': 0,
               'document_links_total': 0}
+    if flin_ssrs_dynamic_ready(con):
+        result['dynamic_status_counts']=dict(con.execute(
+            'SELECT status,COUNT(*) FROM ssrs_fast_road_state GROUP BY status'))
+        result['dynamic_active_groups']=int(con.execute(
+            "SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0])
+        result['dynamic_pending_proposals']=int(con.execute(
+            "SELECT COUNT(*) FROM ssrs_dynamic_proposals WHERE state='pending'").fetchone()[0])
+        result['note']='roads includes legacy source-qualified candidates; only dynamic_status_counts.active has fast transport eligibility.'
+        for item in result['road_sample']:
+            state=con.execute('SELECT status,current_score FROM ssrs_fast_road_state WHERE src=? AND dst=?',
+                              (item['src'],item['dst'])).fetchone()
+            item['dynamic_status']=state[0] if state else 'unassessed'
+            item['dynamic_score']=round(float(state[1]),3) if state else None
+
     if not source_id:
         return result
     source_id = str(source_id)
@@ -8400,6 +8941,88 @@ def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
     return report
 
 
+def flin_ssrs_dynamic_self_test():
+    """Offline v25 acceptance test: overlapping split, idempotency, safe demotion."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='flin_v25_acceptance_') as folder:
+        root=Path(folder)
+        def add_cluster(con,source,index,units):
+            cid=f'{source}:{index}'
+            con.execute('''INSERT INTO abc_input_clusters
+                (id,paper_id,quote,feature_count) VALUES(?,?,?,?)''',
+                (cid,source,'Synthetic independent mathematical input',len(units)))
+            con.executemany('''INSERT INTO abc_cluster_features
+                (cluster_id,unit_id,position) VALUES(?,?,?)''',
+                [(cid,u,float(j)) for j,u in enumerate(units)])
+        with contextlib.closing(database(path=root/'split.sqlite3')) as con:
+            abc_enable(con)
+            with con:
+                for uid in 'ABCDEF':
+                    con.execute('''INSERT INTO abc_units(id,label,status,quality)
+                        VALUES(?,?,'active',95)''',(uid,uid))
+                    con.execute('INSERT INTO abc_ssrs(unit_id,priority,exposures) VALUES(?,0,20)',(uid,))
+                directions=[('A','B'),('A','C'),('B','C'),('D','E'),('D','F'),('E','F'),('C','D')]
+                for a,b in directions:
+                    con.execute('INSERT INTO abc_edges(src,dst,weight,observations) VALUES(?,?,2,10)',(a,b))
+                for i in range(8):
+                    add_cluster(con,'earlyA',i,'ABC')
+                    add_cluster(con,'earlyB',i,'DEF')
+                for a,b in directions[:-1]:
+                    con.execute('INSERT INTO ssrs_fast_roads(src,dst,support) VALUES(?,?,8)',(a,b))
+            first=flin_ssrs_dynamic_update(con,['earlyA','earlyB'])
+            assert first['groups']==2 and first['active_roads']>=2,first
+            initial={tuple(sorted(m['id'] for m in g['members'])):(g['id'],g['color'])
+                     for g in flin_ssrs_dynamic_list_groups(con)}
+            assert set(initial)=={('A','B','C'),('D','E','F')}
+            for n in range(5):
+                with con:
+                    for i in range(4):add_cluster(con,f'cross{n}',i,('C','D'))
+                    con.execute("INSERT OR IGNORE INTO ssrs_fast_roads(src,dst,support) VALUES('C','D',12)")
+                outcome=flin_ssrs_dynamic_update(con,[f'cross{n}'])
+            groups=flin_ssrs_dynamic_list_groups(con)
+            group_sets={frozenset(x['id'] for x in g['members']) for g in groups}
+            assert group_sets=={frozenset('ABC'),frozenset('DEF'),frozenset('CD')},groups
+            # C and D are present in both their original and new communities.
+            overlapping={u:con.execute('''SELECT COUNT(*) FROM ssrs_dynamic_group_members m
+                JOIN ssrs_dynamic_groups g ON g.group_id=m.group_id AND g.status='active'
+                WHERE m.unit_id=?''',(u,)).fetchone()[0] for u in ('C','D')}
+            assert min(overlapping.values())>=2,overlapping
+            assert all(any(g['id']==gid and g['color']==col for g in groups)
+                       for gid,col in initial.values()),'Group ID/color continuity lost.'
+            before=con.execute('SELECT COUNT(*) FROM ssrs_dynamic_update_runs').fetchone()[0]
+            assert not flin_ssrs_dynamic_update(con)['updated']
+            assert con.execute('SELECT COUNT(*) FROM ssrs_dynamic_update_runs').fetchone()[0]==before
+            assert not con.execute("SELECT 1 FROM abc_edges WHERE src='D' AND dst='C'").fetchone()
+            assert con.execute("SELECT status FROM ssrs_fast_road_state WHERE src='C' AND dst='D'").fetchone()[0]=='active'
+        with contextlib.closing(database(path=root/'demote.sqlite3')) as con:
+            abc_enable(con)
+            with con:
+                for uid in 'AB':
+                    con.execute("INSERT INTO abc_units(id,label,status,quality) VALUES(?,?,'active',95)",(uid,uid))
+                    con.execute('INSERT INTO abc_ssrs(unit_id,priority,exposures) VALUES(?,0,10)',(uid,))
+                con.execute("INSERT INTO abc_edges(src,dst,weight,observations) VALUES('A','B',3,10)")
+                con.execute("INSERT INTO ssrs_fast_roads(src,dst,support) VALUES('A','B',10)")
+                for i in range(10):add_cluster(con,'original',i,('A','B'))
+            assert flin_ssrs_dynamic_update(con,['original'])['active_roads']==1
+            baseline=con.execute("SELECT weight,observations FROM abc_edges WHERE src='A' AND dst='B'").fetchone()
+            statuses=[]
+            for wave in range(9):
+                with con:
+                    for i in range(6):
+                        sid=f'one-sided-{wave}-{i}'
+                        for j in range(3):add_cluster(con,sid,j,('A',) if i%2==0 else ('B',))
+                flin_ssrs_dynamic_update(con,[sid])
+                statuses.append(con.execute("SELECT status FROM ssrs_fast_road_state WHERE src='A' AND dst='B'").fetchone()[0])
+            assert statuses[0]=='active' and 'dormant' in statuses,statuses
+            assert con.execute("SELECT weight,observations FROM abc_edges WHERE src='A' AND dst='B'").fetchone()==baseline
+            assert con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0]==0
+        return {'ok':True,'offline':True,'initial_groups':2,'overlapping_split_groups':len(groups),
+                'overlap_memberships':overlapping,'group_identity_preserved':True,
+                'independent_confirmation':True,'idempotent_refresh':True,
+                'no_invented_reverse_edge':True,'road_demotion_after_new_evidence':True,
+                'ordinary_association_preserved':True,'database':'temporary, removed after test'}
+
+
 def flin_ssrs_self_test():
     """Fully offline regression check in a temporary database; never touch live data."""
     import tempfile
@@ -8467,6 +9090,10 @@ def flin_ssrs_self_test():
                 auto_first=abc_ingest_online_clusters(auto_con,paper_id,paper_title,
                     SSRS_EXAMPLE_DOCUMENT,prepared_clusters=paper_clusters)
                 assert auto_first['clusters']>0 and auto_first['ssrs_groups']>=1
+                assert flin_ssrs_dynamic_ready(auto_con), 'v25 dynamic SSRS was not initialized'
+                assert auto_con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0]>=1
+                assert auto_con.execute("SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'").fetchone()[0]>=1
+
                 assert auto_con.execute('''SELECT COUNT(*) FROM ssrs_cooccurrence_evidence''').fetchone()[0]>0
                 remembered=auto_con.execute('SELECT COUNT(*) FROM abc_edges').fetchone()[0]
                 evidence_before=auto_con.execute('SELECT COUNT(*) FROM ssrs_cooccurrence_evidence').fetchone()[0]
@@ -8508,7 +9135,12 @@ def flin_ssrs_self_test():
                 assert not auto_con.execute('''SELECT 1 FROM ssrs_fast_roads r
                    LEFT JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
                    WHERE e.src IS NULL LIMIT 1''').fetchone()
-                auto_summary={'paper_clusters':auto_first['clusters'],
+                auto_summary={'dynamic_ssrs_active_groups':auto_con.execute(
+                    "SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0],
+                    'dynamic_ssrs_active_roads':auto_con.execute(
+                    "SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'").fetchone()[0],
+                    'dynamic_source_grounded':True,
+                    'paper_clusters':auto_first['clusters'],
                     'co_mentioned_pairs':auto_first['ssrs_co_mentioned_pairs'],
                     'groups':auto_first['ssrs_groups'],
                     'independent_co_mention_promotion':promoted['new_fast_roads'],
@@ -8584,15 +9216,20 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
                 for j in range(n_pulses)]
     edge_cache={};labels={uid:label for uid,label,_ in seeds}
     roads={};new_roads={};fast_traversals=0;normal_traversals=0;saved_time=0.
+    dynamic=False
     # No write when save=False; old databases need not have overlay tables yet.
     if ssrs_cfg['enabled'] and con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ssrs_fast_roads'").fetchone():
+        dynamic=flin_ssrs_dynamic_ready(con)
+        road_table=flin_ssrs_active_roads_sql(con)
         roads={(a,b):int(n) for a,b,n in con.execute("""SELECT r.src,r.dst,r.support
             FROM ssrs_fast_roads r JOIN abc_edges e ON e.src=r.src AND e.dst=r.dst
             JOIN abc_units a ON a.id=r.src JOIN abc_units b ON b.id=r.dst
             WHERE a.status='active' AND b.status='active' AND e.weight>=?
             AND r.src NOT LIKE 'flin:shortcut:%' AND r.dst NOT LIKE 'flin:shortcut:%'
-            """,(ssrs_cfg['min_weight'],))}
+            AND (?=0 OR EXISTS (SELECT 1 FROM ssrs_fast_road_state ds
+                WHERE ds.src=r.src AND ds.dst=r.dst AND ds.status='active'))
+            """,(ssrs_cfg['min_weight'],int(dynamic)))}
     initial_roads=len(roads)
     node_recent=defaultdict(deque);edge_recent=defaultdict(deque);edge_weights={}
     pending=[];serial=0;routes={};next_scan=0.;last_time=0.;truncated=0
@@ -8627,7 +9264,10 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
         if pid<15:routes.setdefault(pid,[]).append(current)
         # Highway-generated arrivals cannot alone justify highway formation.
         if not via_fast:node_recent[current].append(tick)
-        if ssrs_cfg['enabled'] and tick>=next_scan:
+        # Pulse traffic is activity, not an independent external input event.
+        # The v25 SSRS layer may NOT bootstrap permanent high-speed roads from
+        # paths already biased by SSRS acceleration.
+        if ssrs_cfg['enabled'] and not dynamic and tick>=next_scan:
             form_roads(tick);next_scan=tick+ssrs_cfg['scan_interval']
         if depth+1>=cfg['max_steps']:
             truncated+=1;continue
@@ -8729,8 +9369,9 @@ def abc_simulate(con,query,*,pulse_hz=18.,input_duration=2.,edge_dt=.0001,
     if save:
         with con:
             ssrs_schema(con)
-            con.executemany('INSERT OR IGNORE INTO ssrs_fast_roads(src,dst,support) VALUES(?,?,?)',
-                            [(a,b,n) for (a,b),n in new_roads.items()])
+            # Never persist fast roads discovered from an internal pulse simulation.
+            # Source-grounded input is the only durable SSRS learning signal.
+
             cur=con.execute('INSERT INTO abc_runs(query,settings_json,result_json) VALUES(?,?,?)',
                             (query,json.dumps(cfg,ensure_ascii=False),json.dumps(result,ensure_ascii=False)))
             run_id=cur.lastrowid;result['run_id']=run_id
@@ -10557,8 +11198,11 @@ class NetworkWindow:
                               ','.join('?'*len(ids))+')',ids+ids).fetchall()
         if 'ssrs' not in result:
             with database() as con:
-                roads=con.execute('SELECT src,dst FROM ssrs_fast_roads WHERE src IN ('+
-                    ','.join('?'*len(ids))+') AND dst IN ('+','.join('?'*len(ids))+')',ids+ids).fetchall()
+                dynamic=flin_ssrs_dynamic_ready(con)
+                roads=con.execute('SELECT src,dst FROM '+flin_ssrs_active_roads_sql(con)+
+                    ' WHERE src IN ('+','.join('?'*len(ids))+') AND dst IN ('+
+                    ','.join('?'*len(ids))+')'+(" AND status='active'" if dynamic else ''),
+                    ids+ids).fetchall()
             result=dict(result,ssrs={'road_edges':roads})
         graph=nx.DiGraph()
         graph.add_nodes_from((uid,{'label':label}) for uid,label in rows)
@@ -13460,16 +14104,26 @@ class ABCNetworkWindow(NetworkWindow):
                     else:
                         group_sql='';params=()
                     group_ids=[r[0] for r in con.execute(
+                        ('SELECT g.group_id FROM ssrs_dynamic_groups g '+
+                         ("WHERE g.group_id=? AND g.status='active'" if group_filter else
+                          "WHERE g.status='active'")+
+                         ' ORDER BY g.cohesion DESC,g.group_id LIMIT 24')
+                        if flin_ssrs_dynamic_ready(con) else
                         'SELECT g.id FROM ssrs_memory_groups g '+group_sql+
                         ' ORDER BY g.support DESC,g.node_count DESC,g.id LIMIT 24',params)]
                     if group_ids:
                         placeholders=','.join('?' for _ in group_ids)
-                        group_memories=con.execute('''SELECT u.id,u.label,u.definition,u.evidence_count
-                            FROM ssrs_memory_group_members m
-                            JOIN ssrs_memory_groups g ON g.id=m.group_id
+                        dynamic=flin_ssrs_dynamic_ready(con)
+                        group_memories=con.execute(('''SELECT u.id,u.label,u.definition,u.evidence_count
+                            FROM ssrs_dynamic_group_members m
                             JOIN abc_units u ON u.id=m.unit_id AND u.status='active'
                             WHERE m.group_id IN ('''+placeholders+''')
-                            GROUP BY u.id ORDER BY SUM(m.mentions) DESC,u.id LIMIT ?''',
+                            GROUP BY u.id ORDER BY COUNT(*) DESC,u.id LIMIT ?''' if dynamic else
+                            '''SELECT u.id,u.label,u.definition,u.evidence_count
+                            FROM ssrs_memory_group_members m
+                            JOIN abc_units u ON u.id=m.unit_id AND u.status='active'
+                            WHERE m.group_id IN ('''+placeholders+''')
+                            GROUP BY u.id ORDER BY COUNT(*) DESC,u.id LIMIT ?'''),
                             (*group_ids,min(limit//2,800))).fetchall()
                         for uid,label,description,evidence in group_memories:
                             selected[uid]=dict(label=label,kind='concept',description=description,
@@ -13530,65 +14184,68 @@ class ABCNetworkWindow(NetworkWindow):
         self.reload_network()
 
     def _flin_prepare_colored_groups(self, nodes):
-        """Load bounded, persisted group membership for exactly the drawn graph.
-
-        When multiple source groups share one memory, the most-supported group
-        gets the default color. The group selector shows other memberships.
-        """
+        """Render committed v25 overlapping groups, with v24 historical fallback."""
         self._flin_visible_group_colors={}
         self._flin_visible_group_roads=[]
         selected_group=getattr(self,'_ssrs_selected_group_id',None)
         with database() as con:
-            total=int(con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0])
-            groups=con.execute('''SELECT id,title,color,node_count,road_count,support
-                   FROM ssrs_memory_groups ORDER BY support DESC,node_count DESC,id LIMIT 60''').fetchall()
-            # Selected groups beyond top 60 remain valid if explicitly requested.
-            if selected_group and selected_group!='none' and not any(g[0]==selected_group for g in groups):
-                extra=con.execute('''SELECT id,title,color,node_count,road_count,support
-                       FROM ssrs_memory_groups WHERE id=?''',(selected_group,)).fetchone()
-                if extra:groups=[extra]+groups[:59]
-            # Source group ids are unambiguous; title labels can be duplicated.
-            old_value=self.ssrs_group_choice.get() if hasattr(self,'ssrs_group_choice') else ''
+            dynamic=flin_ssrs_dynamic_ready(con)
+            if dynamic:
+                total=con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'").fetchone()[0]
+                groups=con.execute('''SELECT g.group_id,g.title,g.color,
+                    (SELECT COUNT(*) FROM ssrs_dynamic_group_members m WHERE m.group_id=g.group_id),
+                    (SELECT COUNT(*) FROM ssrs_dynamic_group_roads r WHERE r.group_id=g.group_id),
+                    g.cohesion FROM ssrs_dynamic_groups g WHERE g.status='active'
+                    ORDER BY g.cohesion DESC,g.group_id LIMIT 60''').fetchall()
+                if selected_group and selected_group!='none' and not any(r[0]==selected_group for r in groups):
+                    extra=con.execute('''SELECT group_id,title,color,
+                      (SELECT COUNT(*) FROM ssrs_dynamic_group_members m WHERE m.group_id=group_id),
+                      (SELECT COUNT(*) FROM ssrs_dynamic_group_roads r WHERE r.group_id=group_id),
+                      cohesion FROM ssrs_dynamic_groups WHERE group_id=? AND status='active' ''',
+                      (selected_group,)).fetchone()
+                    if extra:groups=[extra]+groups[:59]
+            else:
+                total=int(con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0])
+                groups=con.execute('''SELECT id,title,color,node_count,road_count,support
+                    FROM ssrs_memory_groups ORDER BY support DESC,node_count DESC,id LIMIT 60''').fetchall()
+                if selected_group and selected_group!='none' and not any(g[0]==selected_group for g in groups):
+                    extra=con.execute('''SELECT id,title,color,node_count,road_count,support
+                        FROM ssrs_memory_groups WHERE id=?''',(selected_group,)).fetchone()
+                    if extra:groups=[extra]+groups[:59]
             choices={'All colored groups':None,'No group colors':'none'}
             for gid,title,color,count,roads,support in groups:
-                label=f'{title[:49]}  [{count} memories / {roads} FAST]  #{gid[-6:]}'
-                choices[label]=gid
+                choices[f'{title[:49]}  [{count} memories / {roads} roads]  #{gid[-6:]}']=gid
             self.ssrs_group_choice_ids=choices
             if hasattr(self,'ssrs_group_combo'):
                 self.ssrs_group_combo.configure(values=list(choices))
-                if selected_group not in (None,'none'):
-                    new_label=next((lbl for lbl,gid in choices.items() if gid==selected_group),None)
-                else:
-                    new_label='No group colors' if selected_group=='none' else 'All colored groups'
-                self.ssrs_group_choice.set(new_label or 'All colored groups')
-            self.ssrs_group_summary.set(
-                f'{total:,} saved source groups | {len(groups)} selectable | '
-                'colored memories are original FLIN nodes')
-            if selected_group=='none' or not nodes:
-                shown=[]
-            else:
-                shown=[g for g in groups if selected_group is None or g[0]==selected_group][:24]
+                target=next((lbl for lbl,gid in choices.items() if gid==selected_group),None)
+                self.ssrs_group_choice.set(target or ('No group colors' if selected_group=='none' else 'All colored groups'))
+            self.ssrs_group_summary.set(f'{total:,} '+('dynamic overlapping' if dynamic else 'legacy source')+
+                ' fast groups | all members are original FLIN memories')
+            shown=[] if selected_group=='none' or not nodes else [g for g in groups
+                if selected_group is None or g[0]==selected_group][:24]
             visible=set(nodes)
+            member_table='ssrs_dynamic_group_members' if dynamic else 'ssrs_memory_group_members'
+            road_table='ssrs_dynamic_group_roads' if dynamic else 'ssrs_memory_group_roads'
             for gid,title,color,count,roads,support in shown:
-                for (unit_id,) in con.execute('''SELECT unit_id FROM ssrs_memory_group_members
-                     WHERE group_id=?''',(gid,)):
-                    if unit_id in visible and unit_id not in self._flin_visible_group_colors:
-                        self._flin_visible_group_colors[unit_id]=(color,gid)
-                for a,b in con.execute('''SELECT src,dst FROM ssrs_memory_group_roads
-                     WHERE group_id=?''',(gid,)):
-                    if a in visible and b in visible:
+                for (uid,) in con.execute('SELECT unit_id FROM '+member_table+' WHERE group_id=?',(gid,)):
+                    if uid in visible and uid not in self._flin_visible_group_colors:
+                        self._flin_visible_group_colors[uid]=(color,gid)
+                for a,b in con.execute('SELECT src,dst FROM '+road_table+' WHERE group_id=?',(gid,)):
+                    if a in visible and b in visible and (not dynamic or con.execute(
+                            "SELECT 1 FROM ssrs_fast_road_state WHERE src=? AND dst=? AND status='active'",
+                            (a,b)).fetchone()):
                         self._flin_visible_group_roads.append((gid,color,a,b))
         if hasattr(self,'ssrs_group_legend'):
             for old in self.ssrs_group_legend.winfo_children():old.destroy()
             for gid,title,color,count,roads,support in shown[:7]:
                 tk.Label(self.ssrs_group_legend,bg=self.PANEL,fg=color,
-                    text=f'● {title[:33]}  — {count} memories, {roads} FAST roads',
+                    text=f'● {title[:33]}  — {count} memories, {roads} roads',
                     anchor='w',font=('Arial',9)).pack(fill='x')
             if total>len(shown):
                 tk.Label(self.ssrs_group_legend,bg=self.PANEL,fg=self.MUTED,
-                    text=f'… {total-len(shown):,} more groups (use the selector / inspector)',
+                    text=f'… {total-len(shown):,} additional groups (select to inspect)',
                     anchor='w',font=('Arial',9)).pack(fill='x')
-
     def flin_ssrs_groups_window(self):
         """Browse actual source-specific groups; focus member nodes on main 3D."""
         existing=getattr(self,'_flin_groups_window',None)
@@ -13600,8 +14257,8 @@ class ABCNetworkWindow(NetworkWindow):
         win.geometry('1160x730');win.minsize(800,520)
         win.configure(bg=self.BG)
         container=ttk.Frame(win,style='Dark.TFrame',padding=12);container.pack(fill='both',expand=True)
-        self.label(container,'Persisted groups formed by repeated observations within each document or paper. '
-            'A fast road must exist in the directed FLIN graph; grouping never invents reverse edges.',
+        self.label(container,'Dynamic overlapping SSRS groups from repeated source evidence. '
+            'Connections remain one-way; inactive fast roads retain their original ordinary links.',
             note=True,wraplength=1090).pack(fill='x')
         top=ttk.Frame(container,style='Dark.TFrame');top.pack(fill='x',pady=(8,4))
         count_var=tk.StringVar(value='')
@@ -13622,8 +14279,9 @@ class ABCNetworkWindow(NetworkWindow):
             table.delete(*table.get_children())
             with database() as con:
                 groups=flin_ssrs_list_groups(con,limit=300)
-                total=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
-            count_var.set(f'Saved groups: {total:,} | showing {len(groups):,}; select a row to inspect evidence.')
+                total=con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'" if flin_ssrs_dynamic_ready(con)
+                                  else 'SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+            count_var.set(f'Current active groups: {total:,} | showing {len(groups):,}; select a row.')
             for group in groups:
                 iid=table.insert('','end',values=(group['title'],group['node_count'],
                      group['road_count'],group['support']))
@@ -13635,23 +14293,33 @@ class ABCNetworkWindow(NetworkWindow):
             group=records.get(ids[0]);
             if not group:return
             lines=[f"{group['title']}  |  {group['color']}",
-                   f"Source ID: {group['source_id']}",
-                   f"Members: {group['node_count']}; directed FAST roads: {group['road_count']}; source evidence votes: {group['support']}",
-                   '', 'MEMORY UNITS  (count = distinct source input clusters)']
-            lines.extend(f"  {m['label']}  — {m['mentions']} observations" for m in group['members'][:150])
-            lines+=['','DIRECTED FAST ROADS (real outgoing directions only)']
-            lines.extend(f"  {r['source']} → {r['target']}  ({r['source_support']} source-position supports)"
+                   f"Source scope: {group['source_id']}",
+                   f"Members: {group['node_count']}; grouped directional roads: {group['road_count']}",
+                   f"Cohesion: {group.get('cohesion','source-specific')}",
+                   '', 'MEMORY UNITS (a memory may belong to multiple groups)']
+            lines.extend(f"  {m['label']} — affinity/support: {m['mentions']}" for m in group['members'][:150])
+            lines+=['','DIRECTED ROADS']
+            lines.extend(f"  {r['source']} → {r['target']}  ({r['source_support']} input supports)"
                 for r in group['roads'][:150])
             with database() as con:
-                examples=con.execute('''SELECT DISTINCT c.quote FROM (
+                if flin_ssrs_dynamic_ready(con):
+                    lines+=['','SUPPORTING SOURCES']
+                    lines.extend(f"  {s['source_id']} — {s['clusters']} independent clusters" for s in group.get('sources',[])[:20])
+                    examples=con.execute('''SELECT DISTINCT c.quote FROM ssrs_dynamic_group_roads gr
+                      JOIN (SELECT src,dst,cluster_id FROM ssrs_road_evidence
+                            UNION SELECT src,dst,cluster_id FROM ssrs_cooccurrence_evidence) ev
+                      ON ev.src=gr.src AND ev.dst=gr.dst
+                      JOIN abc_input_clusters c ON c.id=ev.cluster_id
+                      WHERE gr.group_id=? LIMIT 8''',(group['id'],)).fetchall()
+                else:
+                    examples=con.execute('''SELECT DISTINCT c.quote FROM (
                         SELECT src,dst,cluster_id,source_id FROM ssrs_road_evidence
-                        UNION
-                        SELECT src,dst,cluster_id,source_id FROM ssrs_cooccurrence_evidence) e
+                        UNION SELECT src,dst,cluster_id,source_id FROM ssrs_cooccurrence_evidence) e
                         JOIN abc_input_clusters c ON c.id=e.cluster_id
                         JOIN ssrs_memory_group_roads gr ON gr.src=e.src AND gr.dst=e.dst
                         WHERE gr.group_id=? AND e.source_id=? LIMIT 8''',
                         (group['id'],group['source_id'])).fetchall()
-            lines+=['','SOURCE QUOTES (observations; not validated math proofs)']
+            lines+=['','SOURCE QUOTES (observations, not theorem validation)']
             lines.extend('  • '+str(q[0])[:460] for q in examples)
             detail.configure(state='normal');detail.delete('1.0','end');detail.insert('1.0','\n'.join(lines));detail.configure(state='disabled')
         def focus():
@@ -13688,8 +14356,11 @@ class ABCNetworkWindow(NetworkWindow):
                     WHERE u.status='active'
                     AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.src=u.id)
                     AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.dst=u.id)''').fetchone()[0]
-                fast_count=con.execute('SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
-                group_count=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+                ready=flin_ssrs_dynamic_ready(con)
+                fast_count=con.execute("SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'" if ready else
+                        'SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
+                group_count=con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'" if ready else
+                        'SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
                 pending=con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0]
             total_memories=status['active']+status['candidates']
             isolated_pct=100*isolated/max(1,status['active'])
@@ -13752,10 +14423,15 @@ class ABCNetworkWindow(NetworkWindow):
             evidence=con.execute("""SELECT s.title,e.explanation,e.url FROM abc_evidence e
                 LEFT JOIN abc_sources s ON s.id=e.source_id
                 WHERE e.unit_id=? ORDER BY e.source_id LIMIT 7""",(key,)).fetchall()
-            membership=con.execute('''SELECT g.title,g.color,m.mentions,g.source_id
-              FROM ssrs_memory_group_members m
-              JOIN ssrs_memory_groups g ON g.id=m.group_id
-              WHERE m.unit_id=? ORDER BY g.support DESC LIMIT 12''',(key,)).fetchall()
+            if flin_ssrs_dynamic_ready(con):
+                membership=con.execute('''SELECT g.title,g.color,m.affinity,'multi-source'
+                  FROM ssrs_dynamic_group_members m JOIN ssrs_dynamic_groups g
+                  ON g.group_id=m.group_id AND g.status='active'
+                  WHERE m.unit_id=? ORDER BY m.affinity DESC LIMIT 20''',(key,)).fetchall()
+            else:
+                membership=con.execute('''SELECT g.title,g.color,m.mentions,g.source_id
+                  FROM ssrs_memory_group_members m JOIN ssrs_memory_groups g ON g.id=m.group_id
+                  WHERE m.unit_id=? ORDER BY g.support DESC LIMIT 12''',(key,)).fetchall()
         self._selected_abc_sources=[r[2] for r in evidence if r[2].startswith('https://')]
         lines=[node['label'],'','Status: '+('Established / Triggerable' if node['kind']=='concept' else 'Legacy candidate'),
                f"Effective input exposures: {exposure[0] if exposure else 0}",
@@ -13768,8 +14444,8 @@ class ABCNetworkWindow(NetworkWindow):
         else:
             lines+=['','This memory can receive effective input but currently has no eligible outgoing links.']
         if membership:
-            lines+=['','SSRS fast memory groups (source-specific visual labels):']
-            lines += [f'• {title[:80]} | {color} | observed in {n} source clusters'
+            lines+=['','SSRS memberships (overlapping groups permitted):']
+            lines += [f'• {title[:80]} | {color} | evidence/affinity {n}'
                 for title,color,n,sid in membership]
         if evidence:
             lines+=['','Original source statements (not verified theorems)']
@@ -14025,6 +14701,7 @@ if __name__ == "__main__":
                         help='Read a TXT/PDF/Markdown/HTML math article, learn inputs and form durable SSRS fast roads')
     parser.add_argument('--ssrs-report',action='store_true',help='Show real persisted SSRS fast roads and learning evidence')
     parser.add_argument('--ssrs-groups-report',action='store_true',help='Show persistent color-coded SSRS memory groups')
+    parser.add_argument('--ssrs-dynamic-self-test',action='store_true',help='Offline v25 overlapping-group, split, demotion, and hysteresis regression tests')
     parser.add_argument('--ssrs-rebuild-groups',type=int,metavar='SOURCES',help='Rebuild groups for up to N saved sources (resumable)')
     parser.add_argument('--ssrs-example',metavar='TXT',help='Create a synthetic sample mathematical article for SSRS testing')
     parser.add_argument('--ssrs-self-test',action='store_true',
@@ -14121,6 +14798,13 @@ if __name__ == "__main__":
     if args.ssrs_example:
         print('Sample mathematics article:',flin_ssrs_write_example(args.ssrs_example))
         sys.exit(0)
+    if args.ssrs_dynamic_self_test:
+        try:
+            print(json.dumps(flin_ssrs_dynamic_self_test(),ensure_ascii=False,indent=2))
+            sys.exit(0)
+        except Exception as exc:
+            print('Dynamic SSRS v25 self-test failed:',type(exc).__name__,str(exc),file=sys.stderr)
+            sys.exit(1)
     if args.ssrs_groups_report:
         with database() as con:
             print(json.dumps(flin_ssrs_list_groups(con,limit=100),ensure_ascii=False,indent=2))
