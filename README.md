@@ -1,171 +1,527 @@
-# FLIN — Feature-Link Intelligence Network
+# FLIN
 
-**Source-Grounded Memory Network · SSRS Fast Memory Groups · Desktop 3D Visualization**
+**Feature-Link Intelligence Network | Brain_Project**
 
-FLIN 是 Brain_Project 的 Python 桌面原型。它將數學文件與文獻中的有效輸入，轉換為可持久化的**記憶元（memory units）**和**單向聯想連結（directed associative links）**，再依照多次觀測的證據決定哪些連結取得 **SSRS（感官塑路系統）高速傳遞資格**。
+**Automatic Mathematical Literature Discovery · Persistent Associative Memory · Color-Coded SSRS Fast Memory Groups**
 
-**v23 的重點：本機文件與線上文獻使用同一個 FLIN 記憶網路。**
+FLIN is an experimental, brain-inspired associative learning system written in Python.
 
-讀取文件後形成的快速記憶元組不再只是另外一個實驗視窗裡的圖，它會存進原本的 SQLite，並以不同顏色直接疊加在主畫面的 3D 記憶網路上。
+It investigates how repeated, source-grounded experiences can build persistent memory units, directed connections, and faster transmission routes.
 
-新建空白網路後，不需要預先下載論文或建立節點，便能直接讀取第一篇文件開始建網。
+**No manual document upload is required.**
 
-> **Research Status:** FLIN is an experimental brain-inspired associative learning system. It does not claim to reproduce biological neural mechanisms or mathematically verify theorems. SSRS fast roads represent learned transmission pathways supported by repeated observations.
+Starting with an empty network, FLIN can automatically discover mathematical literature, extract available text, build memory units, and form SSRS fast memory groups as part of the same network-building process.
+
+> **Research Status:** FLIN is an experimental research prototype. It does not claim to reproduce biological neural mechanisms or mathematically verify theorems. SSRS is an experimentally testable engineering model.
 
 ---
 
-## 1. Overview
+## 1. Project Overview
 
 FLIN explores a fundamental question:
 
-**Can an intelligent system construct useful knowledge structures from repeated experiences instead of relying primarily on pretrained semantic representations?**
+**Can an intelligent system construct useful knowledge structures from repeated experiences rather than relying primarily on pretrained semantic representations?**
 
 The system focuses on:
 
 - Experience-driven memory formation
+- Persistent memory construction
 - Directed associative connections
 - Repeated-input reinforcement
 - Dynamic network construction
 - SSRS fast transmission pathways
+- Automatic fast memory group formation
 - Source-grounded mathematical knowledge
-- Persistent memory structures
+- Cross-document knowledge integration
 - Interactive 3D visualization
 
-FLIN does not require semantic embeddings for constructing its associative memory network.
+FLIN does not require semantic embeddings for constructing its core associative memory network.
 
 Its primary objective is to investigate whether structured memory and repeated associations can provide a foundation for more general learning capabilities.
 
 ---
 
-## 2. Core Architecture
+## 2. What's New in v24.0?
 
-FLIN consists of four major components:
+FLIN v24.0 integrates automatic SSRS formation directly into the literature-driven network construction process.
 
-### 2.1 Memory Units
+When the user clicks **Start Auto Building (Literature + SSRS)**, FLIN attempts to:
+
+1. Discover mathematical subjects using Wikipedia and its research-discovery pipeline.
+2. Find relevant papers through available academic sources and the local literature catalog.
+3. Read available article excerpts, abstracts, and optionally extractable open-access PDF text.
+4. Divide source material into effective input clusters.
+5. Identify mathematical concepts and create or update memory units.
+6. Learn and reinforce directed associative connections.
+7. Measure how frequently memory units co-occur in distinct input clusters within the same source.
+8. Promote qualifying existing directed connections to SSRS fast roads.
+9. Organize source-supported fast roads into persistent fast memory groups.
+10. Display these groups directly in the main 3D memory network using distinct colors.
+
+Memory units, connections, fast roads, groups, and supporting evidence are saved in SQLite.
+
+Users do not need to manually import documents, separately trigger SSRS learning, or apply the resulting groups to another network.
+
+### Key Features
+
+| Feature | Description |
+|---|---|
+| Automatic Literature Discovery | Automatically discovers mathematical subjects and research papers |
+| Automatic Memory Construction | Creates persistent memory units from available academic text |
+| Directed Association Learning | Establishes and reinforces directed associative connections |
+| Co-occurrence Analysis | Measures repeated concept co-occurrence within individual sources |
+| Automatic SSRS Formation | Promotes qualifying connections to fast transmission pathways |
+| Fast Memory Groups | Organizes source-supported fast roads into persistent groups |
+| Automatic Group Coloring | Assigns distinguishable colors to different groups |
+| Main 3D Network Integration | Displays SSRS groups directly inside the primary memory network |
+| Persistent Learning | Preserves memory structures across application restarts |
+| Source Evidence Tracking | Retains supporting text and source information |
+| Network Export | Supports exporting memory structures and associated evidence |
+
+---
+
+## 3. System Architecture
+
+FLIN v24.0 uses the following architecture:
+
+```text
+┌────────────────────────────────┐
+│       Empty FLIN Network       │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│    Automatic Literature        │
+│          Discovery             │
+│                                │
+│   Wikipedia / arXiv / Crossref │
+│   Other Available Sources      │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│    Mathematical Text           │
+│         Extraction             │
+│                                │
+│  Abstracts / Articles / PDFs   │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│     Effective Input Clusters   │
+│                                │
+│    Source + Position + Text    │
+└───────────────┬────────────────┘
+                │
+        ┌───────┴────────┐
+        │                │
+        ▼                ▼
+┌────────────────┐ ┌────────────────┐
+│  Memory Unit   │ │ Co-occurrence  │
+│  Construction  │ │    Analysis    │
+└────────┬───────┘ └────────┬───────┘
+         │                  │
+         ▼                  │
+┌────────────────┐          │
+│   Directed     │          │
+│ Associations   │◄─────────┘
+└────────┬───────┘
+         │
+         ▼
+┌────────────────────────────────┐
+│    Automatic SSRS Road         │
+│          Formation             │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│    SSRS Fast Memory Groups     │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│       Colored 3D FLIN          │
+│        Memory Network          │
+└───────────────┬────────────────┘
+                │
+                ▼
+┌────────────────────────────────┐
+│       Persistent SQLite        │
+└────────────────────────────────┘
+```
+
+All memory units, associative connections, and SSRS transmission pathways belong to the same persistent FLIN network.
+
+---
+
+## 4. Memory Units
 
 Memory units represent mathematical concepts extracted from observed information.
 
-Examples:
+Examples include:
 
 - Matrix
 - Eigenvalue
+- Eigenvector
 - Fourier Transform
+- Laplace Transform
 - Differential Equation
-- Linear Operator
 - Stochastic Process
+- Spectral Theory
+- Linear Operator
+- Numerical Analysis
+
+When the system identifies a mathematical concept, it checks whether a corresponding memory unit already exists.
+
+If the memory unit does not exist, a new unit may be created.
+
+If it already exists, additional source-grounded observations can be incorporated into the existing memory structure.
 
 Memory units are stored in:
 
 `abc_units`
 
-Each memory unit maintains information about its identity, activation eligibility, evidence, and associated connections.
+The network persists after the application closes.
 
-Memory units are persistent.
+---
 
-They are not automatically deleted when the application closes.
+## 5. Directed Associative Network
 
-### 2.2 Directed Associative Network
-
-Memory units are connected through directed associative links.
+FLIN uses directed associative connections between memory units.
 
 For example:
 
+```text
 A → B
+```
 
 This connection does not automatically imply:
 
+```text
 B → A
+```
 
-The associative network is stored in:
+Each directed connection maintains information about its strength and previous observations.
+
+Connections are stored in:
 
 `abc_edges`
 
-Each connection maintains information including:
+### Connection Strength
 
-- Source memory unit
-- Destination memory unit
-- Connection weight
-- Observation count
-- Supporting experience
+The strength of a directed connection is represented by:
 
-Connection strengths may change as additional valid observations enter the network.
+\[
+w_{ij}
+\]
 
-### 2.3 SSRS — Sensory Shaping Routing System
+where:
 
-SSRS introduces fast transmission pathways into the associative network.
+- \(i\): Source memory unit
+- \(j\): Destination memory unit
+- \(w_{ij}\): Strength of the directed association
 
-Repeated valid input observations can establish fast routes between existing memory units.
+Connection strengths can change as additional valid observations enter the network.
 
-A fast route does not create a new mathematical relationship.
+In the associative pulse simulation, a pulse selects one available route at a time.
 
-Instead, it gives an existing directed connection access to a faster transmission mechanism.
+Stronger connections generally have a greater probability of being selected under the model's routing rules.
 
-For example:
+The associative network serves as the foundation for SSRS fast transmission pathways.
 
-A → B → C
+---
 
-If repeated observations provide sufficient evidence, some of these connections may become SSRS fast roads.
+## 6. SSRS — Sensory Shaping Routing System
 
-The original memory units remain unchanged.
+SSRS is FLIN's fast transmission mechanism.
 
-The fast transmission system is an additional routing mechanism rather than a replacement for the associative network.
+It investigates whether repeatedly reinforced associative connections can become more efficient pathways for information transmission.
 
-Fast roads are stored in:
+SSRS does not replace the original memory network.
+
+Instead, it adds fast transmission eligibility to existing directed connections.
+
+### Normal Associative Transmission
+
+```text
+A ────────► B ────────► C
+```
+
+### SSRS Fast Transmission
+
+```text
+A ════════► B ════════► C
+```
+
+Here:
+
+- `────►` represents an ordinary associative connection.
+- `════►` represents an SSRS fast transmission pathway.
+
+Fast transmission pathways preserve the original direction of their underlying associative connections.
+
+They do not automatically create reverse connections.
+
+SSRS fast roads are stored in:
 
 `ssrs_fast_roads`
 
-Supporting observations are recorded in:
+Supporting ordered-input observations are recorded in:
 
 `ssrs_road_evidence`
 
-### 2.4 SSRS Fast Memory Groups
+---
 
-Version 23 introduces persistent SSRS Fast Memory Groups.
+## 7. Automatic SSRS Formation
 
-A fast memory group consists of existing memory units connected through source-supported SSRS fast roads.
+Version 24 introduces automatic SSRS construction based on repeated co-occurrence within individual research sources.
 
-Groups are constructed using repeated observations from the same document or research paper.
+### 7.1 Concept Co-occurrence
+
+Consider a research paper containing the following effective input clusters:
+
+```text
+Input Cluster 1:
+Matrix, Eigenvalue, Eigenvector
+
+Input Cluster 2:
+Matrix, Eigenvalue
+
+Input Cluster 3:
+Matrix, Eigenvalue, Spectral Theory
+
+Input Cluster 4:
+Eigenvalue, Eigenvector
+```
+
+The system calculates how frequently different memory units appear together.
 
 For example:
 
-Document A:
+```text
+Matrix + Eigenvalue = 3
 
-Matrix → Eigenvalue → Eigenvector
+Matrix + Eigenvector = 1
 
-Document B:
+Eigenvalue + Eigenvector = 2
+```
 
-Eigenvalue → Spectral Theory → Linear Operator
+These observations provide evidence of repeated associations within the same source.
 
-If sufficient evidence exists, FLIN may establish separate fast memory groups associated with these documents.
+However, co-occurrence alone does not establish mathematical implication, causality, or semantic equivalence.
 
-Different groups are displayed using different colors.
+### 7.2 Mathematical Definition
 
-A memory unit can belong to multiple groups.
+Let:
 
-Groups do not create additional conceptual duplicates.
+\[
+X_k
+\]
+
+represent the \(k\)-th effective input cluster within source document \(s\).
+
+The co-occurrence count of memory units \(u\) and \(v\) is:
+
+\[
+C_s(u,v)
+=
+\sum_{k=1}^{N_s}
+\mathbf{1}
+\left(
+u\in X_k
+\land
+v\in X_k
+\right)
+\]
+
+where:
+
+- \(s\): Source document
+- \(N_s\): Number of effective input clusters in that document
+- \(u,v\): Memory units
+- \(C_s(u,v)\): Number of clusters containing both memory units
+- \(\mathbf{1}\): Indicator function
+
+Two memory units contribute to the count only when they appear within the same effective input cluster.
+
+Simply appearing somewhere in the same research paper is insufficient.
+
+### 7.3 Fast-Road Qualification
+
+For source document \(s\), define:
+
+- \(M_s(u)\): Number of distinct input clusters containing \(u\)
+- \(C_s(u,v)\): Number of distinct clusters containing both \(u\) and \(v\)
+- \(E(u,v)\): Whether the directed connection \(u \rightarrow v\) already exists
+- \(N(u,v)\): Accumulated observations of the directed connection
+- \(X(u)\): Effective exposure count of memory unit \(u\)
+- \(W(u,v)\): Current connection strength
+
+The default co-occurrence-driven eligibility conditions are:
+
+```text
+M_s(u) >= 2
+M_s(v) >= 2
+C_s(u,v) >= 2
+E(u,v) = True
+N(u,v) >= 2
+X(u) >= 3
+X(v) >= 3
+W(u,v) >= 0.5
+```
+
+When these conditions are satisfied, an existing directed connection may be promoted to an SSRS fast road.
+
+The ordered-input SSRS mechanism remains available as another source of supporting evidence.
+
+### 7.4 Important Constraints
+
+SSRS does not create arbitrary associations solely because two concepts appear together.
+
+For example:
+
+```text
+A → B
+```
+
+may become:
+
+```text
+A ═════► B
+```
+
+However, this does not automatically create:
+
+```text
+B ═════► A
+```
+
+Repeated co-occurrence is treated as evidence for routing eligibility, not proof of a mathematical relationship.
+
+### 7.5 Default Parameters
+
+The current default values in `flin_desktop.py` are:
+
+```python
+SSRS_GROUP_MIN_MENTIONS = 2
+
+SSRS_AUTO_COOCCURRENCE_MIN_CLUSTERS = 2
+
+SSRS_GROUP_MIN_PAIR_EVENTS = 2
+
+SSRS_GROUP_MAX_SOURCE_MEMORIES = 160
+
+SSRS_EVIDENCE_MIN_CLUSTERS = 2
+
+SSRS_EVIDENCE_MIN_EXPOSURES = 3
+
+SSRS_EVIDENCE_MIN_WEIGHT = 0.5
+```
+
+These values are experimental parameters.
+
+Increasing the thresholds generally reduces the number of qualifying fast roads.
+
+Decreasing them may increase the influence of incidental co-occurrence.
 
 ---
 
-## 3. What's New in v23.0
+## 8. SSRS Fast Memory Groups
 
-| Feature | Description |
+SSRS Fast Memory Groups are collections of existing memory units connected through source-supported fast transmission pathways.
+
+For example, one research paper may repeatedly discuss:
+
+```text
+Matrix
+Eigenvalue
+Eigenvector
+```
+
+Another paper may repeatedly discuss:
+
+```text
+Eigenvalue
+Spectral Theory
+Linear Operator
+```
+
+If their supporting evidence and directed connections satisfy the SSRS requirements, separate groups may emerge.
+
+### Group A
+
+```text
+Matrix ═══► Eigenvalue ═══► Eigenvector
+```
+
+### Group B
+
+```text
+Eigenvalue ═══► Spectral Theory ═══► Linear Operator
+```
+
+The groups exist directly within the main FLIN associative network.
+
+They do not require separate memory databases.
+
+### Overlapping Groups
+
+A memory unit may participate in multiple fast memory groups.
+
+For example:
+
+`Eigenvalue`
+
+may belong to both Group A and Group B.
+
+FLIN does not need to create duplicate memory units.
+
+The same underlying memory unit can participate in several source-supported associative structures.
+
+---
+
+## 9. Automatic Group Coloring
+
+FLIN automatically assigns different colors to distinguish SSRS fast memory groups.
+
+Example:
+
+```text
+Group A → Blue
+
+Group B → Orange
+
+Group C → Green
+
+Group D → Purple
+```
+
+Actual colors are assigned by the application.
+
+Group information and colors are stored persistently.
+
+### Visualization Rules
+
+| Visual Element | Meaning |
 |---|---|
-| Empty Network Initialization | Create a completely new FLIN memory network |
-| Document-Based Learning | Build memory units directly from documents |
-| Automatic SSRS Group Formation | Construct fast memory groups from repeated observations |
-| Source-Specific Groups | Preserve the document or paper responsible for each group |
-| Persistent Group Colors | Assign different colors to fast memory groups |
-| Main 3D Network Integration | Display fast groups directly inside the original memory network |
-| Group Filtering | Display all groups or focus on a specific group |
-| Group Evidence Inspection | Examine memory members and supporting observations |
-| Literature Learning Integration | Automatically update groups during literature collection |
-| Persistent SQLite Storage | Preserve memory groups across application restarts |
-| Network Export | Export groups together with the underlying memory network |
-| Historical Group Reconstruction | Rebuild groups from previously recorded evidence |
+| Normal Memory Unit | A learned mathematical concept |
+| Colored Memory Unit | A memory unit belonging to a displayed SSRS group |
+| Ordinary Connection | A regular directed associative link |
+| Colored Fast Connection | A directed connection eligible for SSRS fast transmission |
+| Different Group Colors | Different source-supported fast memory groups |
+| Selected Group | Focused inspection of one group's structure and evidence |
+
+Colors identify groups.
+
+They do not represent mathematical accuracy, confidence, or importance.
+
+When a memory unit belongs to multiple groups, the overview may display only one group color.
+
+Users can select individual groups to inspect overlapping membership.
 
 ---
 
-## 4. Installation
+## 10. Installation
 
 ### Requirements
 
@@ -180,48 +536,52 @@ Groups do not create additional conceptual duplicates.
 - Scikit-learn
 - PyMuPDF
 
-### Installation
+### Install System Dependencies
 
-Create a Python virtual environment:
+```bash
+sudo apt update
+sudo apt install python3-tk python3-venv
+```
+
+### Create a Python Virtual Environment
 
 ```bash
 python3 -m venv .venv
 ```
 
-Activate it:
+Activate the environment:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Install dependencies:
+Upgrade pip:
 
 ```bash
 python -m pip install --upgrade pip
+```
+
+Install Python dependencies:
+
+```bash
 python -m pip install numpy matplotlib networkx requests beautifulsoup4 scikit-learn pymupdf
 ```
 
-Launch FLIN:
+Ollama is optional for automatic literature ingestion and SSRS formation.
 
-```bash
-python FLIN_v23.py
-```
-
-Ollama is optional for document ingestion and SSRS fast group construction.
-
-Some additional mathematical generation and evaluation features may require Ollama.
+Some separate mathematical generation and evaluation features may require Ollama.
 
 ---
 
-## 5. Getting Started
+## 11. Getting Started
 
-### Step 1 — Create a New Memory Network
-
-Launch FLIN:
+### Step 1 — Launch FLIN
 
 ```bash
-python FLIN_v23.py
+python flin_desktop.py
 ```
+
+### Step 2 — Create an Empty Memory Network
 
 Navigate to:
 
@@ -231,289 +591,115 @@ Click:
 
 `New Empty FLIN Network (no data copied)`
 
-This creates an independent SQLite memory network.
+FLIN creates a separate SQLite memory network without overwriting existing networks.
 
-The new network initially contains no learned memory units or associative connections.
+### Step 3 — Start Automatic Network Building
 
-### Step 2 — Import a Document
+Navigate to:
 
-Click:
+`04 Automatic Network Building`
 
-`Read Document → Learn FAST Groups (TXT/PDF/MD)`
+Optionally enable:
 
-Supported formats include:
+`Read Open-Access PDFs When Available`
 
-- TXT
-- PDF
-- Markdown
-- TeX
-- Other supported text-based formats
+Then click:
 
-Select a document.
+`Start Auto Building (Literature + SSRS)`
 
-The learning process does not automatically begin when a file is selected.
+The system begins automatically:
 
-Click:
+1. Discovering mathematical research topics.
+2. Searching for academic literature.
+3. Extracting available mathematical text.
+4. Constructing effective input clusters.
+5. Creating memory units.
+6. Learning directed associative connections.
+7. Measuring source-specific co-occurrence.
+8. Establishing qualifying SSRS fast roads.
+9. Constructing fast memory groups.
+10. Updating the main 3D network.
 
-`▶ 開始讀取`
+**No manual document input is required.**
 
-To interrupt the process:
+### Step 4 — Observe the 3D Network
 
-`■ 結束讀取`
+The main 3D visualization displays:
 
-Previously completed and committed observations remain stored.
+- Learned memory units
+- Ordinary associative connections
+- SSRS fast transmission pathways
+- Color-coded fast memory groups
 
-### Step 3 — Automatic Memory Construction
+As new literature is processed, the network visualization updates.
 
-During document ingestion, FLIN attempts to:
+### Step 5 — Inspect Fast Memory Groups
 
-1. Extract document text.
-2. Divide text into effective input segments.
-3. Identify mathematical concepts.
-4. Match concepts with existing memory units.
-5. Create new memory units when necessary.
-6. Record effective input clusters.
-7. Establish or reinforce directed associations.
-8. Evaluate SSRS fast-road eligibility.
-9. Construct source-specific fast memory groups.
-10. Update the persistent memory network.
-
-New documents extend the existing network rather than automatically creating completely separate networks.
-
-### Step 4 — Visualize Memory Groups
-
-After learning, return to the main 3D memory network.
-
-Fast memory groups are displayed directly in the original network.
-
-Different groups receive different colors.
-
-Use:
+Navigate to:
 
 `02B SSRS Fast Memory Groups`
-
-Available operations include:
-
-- Display all colored groups
-- Select an individual group
-- Inspect group members
-- Inspect supporting evidence
-- Focus on a selected group
-- Show group connections in the main 3D network
 
 Click:
 
 `Inspect Groups + Evidence`
 
-to examine the structure and evidence of each group.
-
-### Step 5 — Continue Learning
-
-Import additional documents.
-
-FLIN continues learning within the same selected memory network.
-
-Existing memory units may receive additional observations and connections.
-
-New fast memory groups may emerge when the evidence requirements are satisfied.
-
----
-
-## 6. SSRS Fast Memory Group Formation
-
-### 6.1 Fundamental Principle
-
-A fast memory group should not be established simply because several concepts appear somewhere in the same document.
-
-FLIN considers repeated effective input observations and previously learned directed associations.
-
-The current implementation requires sufficient evidence before an association can become part of a fast memory group.
-
-This distinction is important:
-
-**Co-occurrence alone is not equivalent to a validated mathematical relationship.**
-
-### 6.2 Memory-Level Requirements
-
-A memory unit must appear in at least two distinct effective input clusters from the same source.
-
-Default parameter:
-
-```python
-SSRS_GROUP_MIN_MENTIONS = 2
-```
-
-This requirement helps identify repeatedly observed concepts.
-
-### 6.3 Connection-Level Requirements
-
-For an association:
-
-A → B
-
-to enter a source-specific fast memory group:
-
-1. The directed connection must already exist in the associative network.
-2. It must have SSRS fast-road eligibility.
-3. The source document must provide sufficient supporting observations.
-4. The connection must satisfy the source-specific evidence threshold.
-
-Default parameter:
-
-```python
-SSRS_GROUP_MIN_PAIR_EVENTS = 2
-```
-
-### 6.4 Fast-Road Eligibility
-
-The underlying SSRS fast-road mechanism uses separate evidence thresholds.
-
-Current defaults:
-
-```python
-SSRS_EVIDENCE_MIN_CLUSTERS = 2
-SSRS_EVIDENCE_MIN_EXPOSURES = 3
-SSRS_EVIDENCE_MIN_WEIGHT = 0.5
-```
-
-These parameters describe:
-
-- Minimum number of distinct supporting input clusters
-- Minimum accumulated exposure requirement
-- Minimum associative connection weight
-
-The group formation process uses the fast roads that satisfy the underlying SSRS requirements.
-
-### 6.5 Group Construction
-
-Eligible source-supported fast roads are organized into connected groups for visualization.
-
-For example:
-
-A → B
-
-B → C
-
-may be displayed as one fast memory group.
-
-Another independent connection:
-
-D → E
-
-may form a separate group.
-
-Connectivity used for grouping is a visualization and organization rule.
-
-It does not convert directed associations into bidirectional connections.
-
-### 6.6 Performance Limits
-
-The current implementation limits the source-specific candidate inspection process.
-
-Default:
-
-```python
-SSRS_GROUP_MAX_SOURCE_MEMORIES = 160
-```
-
-This limit controls processing cost.
-
-It is not a theoretical restriction on the possible number of memory units in a fast group.
-
----
-
-## 7. Group Colors and Visualization
-
-Fast memory groups are represented using different colors in the main 3D network.
-
-### Visual Representation
-
-| Visual Element | Meaning |
-|---|---|
-| Colored Memory Unit | Memory unit associated with a displayed SSRS fast group |
-| Thick Colored Connection | Existing directed association recognized as a source-supported fast road |
-| Blue-Gray Connection | Ordinary associative connection |
-| Uncolored Memory Unit | Memory unit outside the currently displayed groups |
-| Selected Group | Highlights the chosen source-specific fast memory group |
-
-Colors identify groups.
-
-They do not represent mathematical truth, causal certainty, or knowledge quality.
-
-### Overlapping Memory Groups
-
-A memory unit may belong to multiple groups.
-
-Example:
-
-Document A:
-
-A → B
-
-Document B:
-
-B → C
-
-Memory unit B may participate in both groups.
-
-FLIN does not create two separate copies of B.
-
-The same memory unit is shared.
-
-When all groups are displayed, a memory unit receives one display color.
-
-Selecting an individual group allows users to inspect its membership and connections independently.
-
-### Interactive 3D Network
-
-The main visualization supports interactive operations such as:
-
-- Rotation
-- Zooming
-- Memory selection
-- Group inspection
-- Connection exploration
-- Group-focused visualization
-
-For performance reasons, the 3D visualization may display a subset of the complete stored network.
-
-The SQLite database remains the authoritative source of memory and connection data.
-
----
-
-## 8. Literature-Based Automatic Network Construction
-
-FLIN can also construct its memory network using mathematical research literature.
-
-Instead of manually importing individual documents, users may start the literature collection pipeline.
+Available information includes:
+
+- Group identity
+- Source literature
+- Group color
+- Memory unit members
+- Observation counts
+- Fast-road directions
+- Supporting source passages
+
+### Step 6 — Stop Network Building
 
 Click:
 
-`Start Building (Literature → FLIN)`
+`Stop and Save`
 
-The system uses its existing literature collection and filtering mechanisms.
+Previously committed memory units, associative connections, fast roads, and groups remain stored in SQLite.
+
+### Continuous Discovery
+
+The option:
+
+`Continuous discovery and periodic retry (until stopped)`
+
+is enabled by default.
+
+Disabling it allows a bounded collection based on the configured topic and paper limits.
+
+Continuous discovery does not guarantee unlimited new literature or unrestricted access to external research APIs.
+
+---
+
+## 12. Literature Sources
+
+FLIN uses its existing research discovery and retrieval workflow.
 
 Potential sources include:
 
 - Wikipedia
 - arXiv
 - Crossref
-- OpenAlex, when configured
-- Previously collected local literature
+- Local Literature Catalog
+- Other supported academic sources
 
-Retrieved mathematical information can enter the FLIN learning pipeline.
+Optional providers, including OpenAlex, may require additional configuration.
 
-Each document or paper contributes observations to the shared memory network.
+Literature availability depends on external services, licensing, API limits, and open-access availability.
 
-After relevant input and associative processing, FLIN evaluates whether the source supports SSRS fast memory groups.
+FLIN cannot guarantee that every research paper has an accessible full-text PDF.
 
-This makes document-based learning and literature-based network construction part of the same architecture.
+When full text is unavailable, the system may learn from available abstracts or article excerpts.
 
 ---
 
-## 9. Database Architecture
+## 13. Database Architecture
 
-FLIN stores its memory network in SQLite.
+FLIN stores its persistent memory network using SQLite.
 
 ### Main Tables
 
@@ -521,31 +707,24 @@ FLIN stores its memory network in SQLite.
 |---|---|
 | `abc_units` | Persistent memory units |
 | `abc_edges` | Directed associative connections |
-| `abc_input_clusters` | Effective input clusters and their sources |
-| `abc_cluster_features` | Memory units identified within input clusters |
-| `ssrs_fast_roads` | SSRS high-speed transmission connections |
-| `ssrs_road_evidence` | Evidence supporting fast-road eligibility |
-| `ssrs_memory_groups` | Persistent fast memory group definitions |
-| `ssrs_memory_group_members` | Membership relationships |
-| `ssrs_memory_group_roads` | Fast roads belonging to individual groups |
-| `ssrs_document_reads` | Document ingestion records |
-| `ssrs_document_read_sessions` | Document reading session states |
+| `abc_ssrs` | Memory exposure and routing-related state |
+| `abc_sources` | Literature source metadata |
+| `abc_input_clusters` | Effective input clusters |
+| `abc_cluster_features` | Memory units detected in each cluster |
+| `ssrs_fast_roads` | SSRS high-speed transmission pathways |
+| `ssrs_road_evidence` | Ordered-input evidence for fast roads |
+| `ssrs_cooccurrence_evidence` | Source-specific co-occurrence evidence |
+| `ssrs_memory_groups` | Persistent fast memory groups |
+| `ssrs_memory_group_members` | Group membership and observations |
+| `ssrs_memory_group_roads` | Fast roads belonging to each group |
 
-### Data Persistence
-
-Memory units, associations, fast roads, and fast memory groups are stored persistently.
-
-Closing FLIN does not automatically reset the network.
-
-Different networks can be created and selected independently.
-
-Default storage location:
+### Default Storage Location
 
 ```text
 ~/.local/share/brain_project/
 ```
 
-Independent networks:
+Independent memory networks:
 
 ```text
 ~/.local/share/brain_project/networks/
@@ -557,320 +736,279 @@ Network registry:
 ~/.local/share/brain_project/network_registry.json
 ```
 
-Shared literature catalog:
+Stored memory networks remain available after the application closes.
 
-```text
-~/.local/share/brain_project/literature_catalog.sqlite3
-```
+Version 24 also supports incremental reconstruction of SSRS group evidence for previously saved literature.
 
 ---
 
-## 10. Command-Line Interface
+## 14. Command-Line Interface
 
-FLIN provides command-line utilities for testing and network management.
-
-### Run Self-Test
+### Run Offline Self-Test
 
 ```bash
-python FLIN_v23.py --ssrs-self-test
-```
-
-The self-test uses temporary SQLite data.
-
-It does not intentionally modify the user's existing research network.
-
-### Generate an Example Mathematical Document
-
-```bash
-python FLIN_v23.py --ssrs-example example_math.txt
-```
-
-This generates a synthetic mathematical document for testing.
-
-It is not a real academic research paper.
-
-### Create a New Network
-
-```bash
-python FLIN_v23.py --new-network "FLIN_SSRS_Experiment"
-```
-
-### Read a Document
-
-```bash
-python FLIN_v23.py --ssrs-read-document example_math.txt
-```
-
-The document is processed into the currently selected network.
-
-### Inspect Fast Memory Groups
-
-```bash
-python FLIN_v23.py --ssrs-groups-report
-```
-
-### Rebuild Groups From Existing Evidence
-
-```bash
-python FLIN_v23.py --ssrs-rebuild-groups 300
-```
-
-### Inspect SSRS Fast Roads
-
-```bash
-python FLIN_v23.py --ssrs-report
+python flin_desktop.py --ssrs-self-test
 ```
 
 ### List Available Networks
 
 ```bash
-python FLIN_v23.py --list-networks
+python flin_desktop.py --list-networks
+```
+
+### Inspect SSRS Fast Roads
+
+```bash
+python flin_desktop.py --ssrs-report
+```
+
+### Inspect Fast Memory Groups
+
+```bash
+python flin_desktop.py --ssrs-groups-report
+```
+
+### Rebuild Historical SSRS Groups
+
+```bash
+python flin_desktop.py --ssrs-rebuild-groups 300
+```
+
+This command rebuilds groups for up to 300 previously stored sources.
+
+It is intended for diagnostics and historical-data migration.
+
+Regular automatic network building already includes SSRS formation.
+
+### Show Available Arguments
+
+```bash
+python flin_desktop.py --help
 ```
 
 ---
 
-## 11. Exporting and Backing Up Networks
+## 15. Network Export and Persistence
 
-FLIN supports persistent network export.
+FLIN supports network export and backup.
 
-Users can export network data using the existing network export functions.
-
-Supported export approaches include:
-
-- Complete SQLite snapshot
-- Portable JSONL-based network export
-
-Version 23 includes SSRS group information in the exported network data.
-
-Relevant information includes:
+Stored information includes:
 
 - Memory units
-- Associative connections
-- Fast roads
+- Directed associative links
+- Effective input clusters
+- Source evidence
+- SSRS fast roads
+- Co-occurrence evidence
 - Fast memory groups
-- Group members
-- Group road membership
-- Supporting evidence
+- Group membership
 
-For a complete application backup, use the full SQLite export.
+Export options include:
 
-A visual screenshot of the network is not equivalent to a complete network backup.
+- Complete SQLite snapshots
+- Portable JSONL-based network data
 
----
+A screenshot of the 3D visualization is not equivalent to a complete network backup.
 
-## 12. Recommended Experiments
-
-The purpose of FLIN is not simply to maximize the number of generated memory units.
-
-A meaningful experiment should evaluate whether the network captures useful structural information.
-
-### Experiment A — Single Document Learning
-
-Create an empty network.
-
-Import a mathematical document.
-
-Measure:
-
-1. Number of extracted mathematical concepts
-2. Number of memory units created
-3. Number of directed associations established
-4. Number of SSRS fast roads formed
-5. Number of fast memory groups generated
-6. Supporting evidence for each group
-
-Compare the resulting structure with manually identified concepts.
-
-### Experiment B — Repeated Document Ingestion
-
-Import the same document again.
-
-Check whether previously processed source observations are handled consistently.
-
-Duplicate ingestion should not artificially increase observation strength when the same source positions have already been recorded.
-
-### Experiment C — Multi-Document Learning
-
-Import multiple documents covering related mathematical topics.
-
-Examples:
-
-- Linear Algebra
-- Spectral Theory
-- Differential Equations
-- Numerical Analysis
-
-Observe whether different documents produce partially overlapping fast memory groups.
-
-Check whether shared mathematical concepts remain represented by the same underlying memory units.
-
-### Experiment D — Association and Fast Transmission
-
-Select a memory unit and execute an associative pulse simulation.
-
-Observe:
-
-- Ordinary associative hops
-- SSRS fast hops
-- Activated memory units
-- Traversed pathways
-
-A fast road existing in the database does not mean every pulse must traverse it.
-
-### Experiment E — Knowledge Structure Evaluation
-
-Create a manually annotated reference network.
-
-Compare it with the network produced by FLIN.
-
-Suggested metrics:
-
-**Precision**
-
-How many extracted associations correspond to valid reference relationships?
-
-**Recall**
-
-How many important reference relationships were successfully recovered?
-
-**Group Stability**
-
-How consistent are the resulting groups under controlled repeated experiments?
-
-**Source Consistency**
-
-How accurately do group members and connections correspond to evidence in the original documents?
-
-These measurements provide stronger evidence of learning performance than node counts alone.
+The database remains the authoritative source of network information.
 
 ---
 
-## 13. Known Limitations
+## 16. Known Limitations
 
-FLIN v23 remains an experimental research prototype.
+FLIN v24.0 remains an experimental research prototype.
 
 ### Mathematical Understanding
 
-The current document learning process relies primarily on text extraction and rule-based mathematical concept identification.
+The current mathematical concept extraction process relies primarily on text analysis and rule-based identification.
 
 It does not guarantee complete understanding of:
 
 - Mathematical proofs
 - Symbolic expressions
-- Formula semantics
-- Theorem dependencies
 - Mathematical equivalence
+- Theorem dependencies
+- Formula semantics
 
-### PDF Extraction
+### Co-occurrence Is Not Mathematical Implication
 
-Text-based PDFs are supported.
+Two concepts frequently appearing together does not mean they have a mathematically necessary relationship.
 
-Scanned image PDFs may require OCR.
+SSRS constructs fast transmission pathways based on repeated observations and existing associative structures.
 
-Complex mathematical formatting can cause extraction errors.
+### Literature Availability
 
-Current document-processing limits include:
+Not all research papers provide accessible full text.
 
-- Maximum file size: 35 MB
-- Maximum PDF pages processed: 120
-- Maximum extracted characters: 650,000
-- Maximum text segments: 650
+External APIs, network availability, and PDF extraction quality may limit the available information.
 
-These limits are implementation constraints.
+### Directionality
 
-### Association Quality
+SSRS preserves the original direction of associative connections.
 
-Repeated co-occurrence does not necessarily imply a meaningful mathematical relationship.
+It does not automatically introduce reverse connections.
 
-FLIN records and reinforces observations according to its current associative learning rules.
+### Fast Hops
 
-Further research is required to establish whether its learned structures consistently represent mathematical knowledge.
+A pulse simulation may report zero fast hops even when SSRS fast roads exist.
+
+This can occur when the simulated pulse does not select an available fast route.
 
 ### Visualization
 
-The main 3D network uses performance-conscious sampling.
+Large networks may exceed the number of nodes that can be rendered interactively.
 
-Not every memory unit or edge is necessarily visible simultaneously.
-
-Display colors are identifiers, not confidence scores.
+The 3D display may show only a subset of the complete stored graph.
 
 ### Research Validation
 
-The current implementation has been tested for core document learning, persistence, SSRS group construction, visualization, and related functions.
+SSRS formation rules are experimental engineering assumptions.
 
-Large-scale academic literature collection still depends on external services, available research materials, and computing resources.
+Their effectiveness must be evaluated through reproducible experiments and comparison with appropriate reference structures.
 
 ---
 
-## 14. Research Roadmap
+## 17. Suggested Experiments
 
-FLIN is part of the broader Brain_Project research initiative.
+### Experiment A — Automatic Memory Construction
 
-Its long-term direction is to investigate how structured experience and associative memory can support the development of intelligent systems.
+Create a new empty memory network.
 
-Potential research directions include:
+Automatically collect a bounded set of related mathematical research papers.
+
+Measure:
+
+1. Number of memory units created.
+2. Number of directed associations established.
+3. Number of effective input clusters.
+4. Number of SSRS fast roads.
+5. Number of fast memory groups.
+
+### Experiment B — Co-occurrence Threshold Analysis
+
+Use a fixed collection of research documents.
+
+Compare different SSRS co-occurrence thresholds.
+
+Evaluate how threshold changes affect group formation, noise, and structural stability.
+
+### Experiment C — Cross-Document Learning
+
+Automatically collect literature from related research areas.
+
+Examples:
+
+- Linear Algebra
+- Spectral Theory
+- Numerical Analysis
+- Differential Equations
+
+Investigate whether shared concepts participate in multiple source-supported fast memory groups.
+
+### Experiment D — Directionality Validation
+
+Sample established SSRS fast roads.
+
+Verify that each road corresponds to an existing directed association in `abc_edges`.
+
+### Experiment E — Knowledge Structure Evaluation
+
+Construct a manually annotated reference network.
+
+Compare the automatically generated FLIN structures against it.
+
+Suggested metrics:
+
+- Precision
+- Recall
+- Group Stability
+- Source Consistency
+- Association Reproducibility
+
+### Experiment F — Fast Transmission
+
+Select an identical starting memory unit across repeated pulse simulations.
+
+Measure:
+
+- Ordinary associative hops
+- SSRS fast hops
+- Activated memory units
+- Transmission time
+- Response distribution
+
+These measurements can help evaluate whether SSRS pathways provide functional benefits beyond ordinary associative connections.
+
+---
+
+## 18. Research Roadmap
 
 ### Phase 1 — Persistent Associative Memory
 
-Construct and maintain an experience-driven memory network.
+Construct and maintain a source-grounded memory network.
 
-### Phase 2 — Fast Memory Group Formation
+### Phase 2 — Automatic SSRS Formation
 
-Use repeated observations to establish source-grounded SSRS transmission pathways.
+Automatically establish fast associative transmission pathways through repeated observations.
 
-### Phase 3 — Knowledge Structure Evaluation
+### Phase 3 — Knowledge Structure Validation
 
-Determine whether fast memory groups reflect meaningful conceptual structures.
+Evaluate whether fast memory groups represent useful conceptual structures.
 
-### Phase 4 — Cross-Document Association
+### Phase 4 — Cross-Document Knowledge Integration
 
-Study how concepts learned from separate documents interact within a shared memory network.
+Investigate how knowledge extracted from different sources interacts within a shared associative network.
 
 ### Phase 5 — Cross-Domain Knowledge Transfer
 
-Investigate whether previously learned structures can support the formation of new conceptual relationships in unfamiliar domains.
+Explore whether previously learned structures can support the formation of new relationships in unfamiliar domains.
 
-### Phase 6 — Generalized Intelligent Behavior
+### Phase 6 — Generalized Intelligent Learning
 
-Explore whether associative memory, structured experience, and adaptive routing can contribute to broader reasoning and learning capabilities.
+Investigate whether persistent associative memory and adaptive routing can contribute to broader intelligent behavior.
 
 These phases represent research objectives rather than demonstrated capabilities.
 
 ---
 
-## 15. Project Philosophy
+## 19. Project Philosophy
 
-FLIN is based on the idea that intelligence may depend not only on how much information a system stores, but also on how previous experiences influence its future responses.
+FLIN is based on a central idea:
+
+**Intelligence may depend not only on what a system knows, but also on how previous experiences reshape the way it processes new information.**
 
 The project investigates whether repeated experiences can gradually shape a persistent associative network and create more efficient pathways for information transmission.
+
+Rather than treating intelligence as a collection of independent benchmark capabilities, FLIN explores how memory structures may develop and reorganize through experience.
 
 The central research question is:
 
 **How can a system use its existing knowledge structures to construct, connect, and internalize previously unknown knowledge?**
 
-Rather than treating intelligence as a collection of independent benchmark capabilities, FLIN explores the mechanisms through which memory structures may develop and reorganize through experience.
-
 ---
 
-## 16. Project Status
+## 20. Project Status
 
-**Current Version:** FLIN v23.0
+**Version:** FLIN v24.0
 
 **Project:** Brain_Project
 
 **System:** Feature-Link Intelligence Network
 
-**Primary Language:** Python
+**Executable:** `flin_desktop.py`
 
-**Interface:** Desktop GUI with interactive 3D visualization
+**Primary Language:** Python 3.10+
+
+**Interface:** Tkinter + Matplotlib 3D
 
 **Storage:** SQLite
 
 **Primary Research Areas:**
 
-- Associative Memory
 - Brain-Inspired Artificial Intelligence
-- Experience-Driven Learning
+- Associative Learning
+- Persistent Memory
+- Experience-Driven Intelligence
 - Dynamic Memory Networks
 - Mathematical Knowledge Representation
 - Fast Transmission Pathways
