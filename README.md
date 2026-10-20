@@ -1,538 +1,890 @@
-# FLIN — Rethinking How AI Learns
+# FLIN v23.0 — Feature-Link Intelligence Network
 
-### Feature-Link Intelligence Network
+**Source-Grounded Memory Network · SSRS Fast Memory Groups · Desktop 3D Visualization**
 
-**An experimental architecture for intelligence through memory, association, and experience-driven structural adaptation.**
+FLIN 是 Brain_Project 的 Python 桌面原型。它將數學文件與文獻中的有效輸入，轉換為可持久化的**記憶元（memory units）**和**單向聯想連結（directed associative links）**，再依照多次觀測的證據決定哪些連結取得 **SSRS（感官塑路系統）高速傳遞資格**。
 
-FLIN is an open-source research project exploring a fundamental question:
+**v23 的重點：本機文件與線上文獻使用同一個 FLIN 記憶網路。**
 
-> What if intelligence emerges not primarily from learning to generate outputs, but from the continuous formation, interaction, and reorganization of memories?
+讀取文件後形成的快速記憶元組不再只是另外一個實驗視窗裡的圖，它會存進原本的 SQLite，並以不同顏色直接疊加在主畫面的 3D 記憶網路上。
 
-Most modern AI systems learn statistical relationships through parameter optimization. FLIN investigates a different architectural direction: representing experience through interconnected memory units and allowing information to propagate through a continuously evolving network.
+新建空白網路後，不需要預先下載論文或建立節點，便能直接讀取第一篇文件開始建網。
 
-Instead of treating knowledge as static information to be retrieved, FLIN treats memory as an active computational structure.
-
-The long-term objective is to investigate whether learning, association, prediction, and knowledge transfer can emerge from a unified memory-based mechanism.
-
-**FLIN is currently an experimental research framework, not a demonstrated general intelligence system.**
+> **Research Status:** FLIN is an experimental brain-inspired associative learning system. It does not claim to reproduce biological neural mechanisms or mathematically verify theorems. SSRS fast roads represent learned transmission pathways supported by repeated observations.
 
 ---
 
-## 1. The Fundamental Idea
+## 1. Overview
 
-### Intelligence as an Emergent Property of Memory
+FLIN explores a fundamental question:
 
-FLIN begins with a hypothesis:
+**Can an intelligent system construct useful knowledge structures from repeated experiences instead of relying primarily on pretrained semantic representations?**
 
-**Intelligence may emerge from how experiences are represented, connected, activated, and reorganized over time.**
+The system focuses on:
 
-Consider how humans acquire knowledge.
+- Experience-driven memory formation
+- Directed associative connections
+- Repeated-input reinforcement
+- Dynamic network construction
+- SSRS fast transmission pathways
+- Source-grounded mathematical knowledge
+- Persistent memory structures
+- Interactive 3D visualization
 
-When encountering something unfamiliar, we rarely process it in complete isolation.
+FLIN does not require semantic embeddings for constructing its associative memory network.
 
-Instead, new information interacts with what we already know.
-
-A new mathematical concept may remind us of an existing physical principle. A familiar structure may become useful in an entirely different domain.
-
-These associations can influence how we interpret subsequent experiences.
-
-FLIN attempts to model this process computationally.
-
-Its fundamental learning cycle is:
-
-**Experience → Feature Selection → Memory Formation → Association → Activation → Structural Adaptation**
-
-Each experience can modify the system's memory structure.
-
-As the structure evolves, the same input may produce different associative responses.
-
-Learning therefore changes not only what the system stores, but also how the system processes future information.
+Its primary objective is to investigate whether structured memory and repeated associations can provide a foundation for more general learning capabilities.
 
 ---
 
-## 2. The Core Architecture
+## 2. Core Architecture
 
-FLIN is organized around several interacting theoretical components.
+FLIN consists of four major components:
 
 ### 2.1 Memory Units
 
-A Memory Unit is the fundamental representational element of FLIN.
+Memory units represent mathematical concepts extracted from observed information.
 
-Rather than treating memory as an unstructured collection of stored documents, FLIN represents experience through interconnected units.
+Examples:
 
-A memory unit may contain:
+- Matrix
+- Eigenvalue
+- Fourier Transform
+- Differential Equation
+- Linear Operator
+- Stochastic Process
 
-- Features extracted from previous experiences
-- Connections to other memory units
-- Connection strengths
-- Activation and response thresholds
-- Mechanisms for responding to incoming signals
+Memory units are stored in:
 
-A memory unit does not independently represent intelligence.
+`abc_units`
 
-Its computational significance depends on its interactions with the surrounding network.
+Each memory unit maintains information about its identity, activation eligibility, evidence, and associated connections.
 
-**The central idea is that relationships between memories are as important as the information stored within them.**
+Memory units are persistent.
 
-A valid experience can establish a triggerable memory unit during its first encounter.
+They are not automatically deleted when the application closes.
 
-Subsequent experiences may strengthen, modify, or extend its relationships.
+### 2.2 Directed Associative Network
 
-This allows FLIN to investigate learning mechanisms that do not require repeated exposure before a memory can participate in association.
+Memory units are connected through directed associative links.
 
-### 2.2 Effective Input Clusters
+For example:
 
-FLIN does not assume that every piece of incoming information should influence memory equally.
+A → B
 
-Instead, incoming sensory or symbolic information is processed through an attention-related selection mechanism.
+This connection does not automatically imply:
 
-The selected features collectively form an **Effective Input Cluster**.
+B → A
 
-An Effective Input Cluster represents the relevant aspects of an experience while preserving relationships among its components.
+The associative network is stored in:
 
-For example, an experience may contain information about:
+`abc_edges`
 
-- An object
-- Its physical properties
-- Its surrounding environment
-- Its relationship to other objects
-- The temporal or contextual conditions of the observation
+Each connection maintains information including:
 
-Some features may be excluded during selection.
+- Source memory unit
+- Destination memory unit
+- Connection weight
+- Observation count
+- Supporting experience
 
-The remaining features are processed together rather than being treated as completely independent observations.
+Connection strengths may change as additional valid observations enter the network.
 
-This mechanism is intended to preserve contextual relationships during memory formation.
+### 2.3 SSRS — Sensory Shaping Routing System
 
-### 2.3 Sensory-Shaped Routing System (SSRS)
+SSRS introduces fast transmission pathways into the associative network.
 
-The Sensory-Shaped Routing System, or SSRS, is a proposed mechanism responsible for connecting effective inputs with the memory network.
+Repeated valid input observations can establish fast routes between existing memory units.
 
-SSRS is intended to support experience-dependent routing and activation.
+A fast route does not create a new mathematical relationship.
 
-Its theoretical responsibilities include:
+Instead, it gives an existing directed connection access to a faster transmission mechanism.
 
-1. Receiving effective input clusters
-2. Identifying relevant memory structures
-3. Establishing activation pathways
-4. Supporting the formation and modification of memory connections
-5. Directing activation toward corresponding memory units
+For example:
 
-The underlying hypothesis is that experiences should not merely enter a fixed computational structure.
+A → B → C
 
-**Experiences should also participate in shaping the structure through which future information travels.**
+If repeated observations provide sufficient evidence, some of these connections may become SSRS fast roads.
 
-This makes the routing mechanism itself part of the learning process.
+The original memory units remain unchanged.
 
-The complete mathematical and computational formulation of SSRS remains an active research problem.
+The fast transmission system is an additional routing mechanism rather than a replacement for the associative network.
+
+Fast roads are stored in:
+
+`ssrs_fast_roads`
+
+Supporting observations are recorded in:
+
+`ssrs_road_evidence`
+
+### 2.4 SSRS Fast Memory Groups
+
+Version 23 introduces persistent SSRS Fast Memory Groups.
+
+A fast memory group consists of existing memory units connected through source-supported SSRS fast roads.
+
+Groups are constructed using repeated observations from the same document or research paper.
+
+For example:
+
+Document A:
+
+Matrix → Eigenvalue → Eigenvector
+
+Document B:
+
+Eigenvalue → Spectral Theory → Linear Operator
+
+If sufficient evidence exists, FLIN may establish separate fast memory groups associated with these documents.
+
+Different groups are displayed using different colors.
+
+A memory unit can belong to multiple groups.
+
+Groups do not create additional conceptual duplicates.
 
 ---
 
-## 3. Associative Memory Network
+## 3. What's New in v23.0
 
-### 3.1 Directed Memory Connections
-
-FLIN represents associative relationships through directed connections between memory units.
-
-A simplified representation is:
-
-\[
-G_t = (V_t, E_t, W_t)
-\]
-
-where:
-
-- \(V_t\) represents the set of memory units.
-- \(E_t\) represents directed associations.
-- \(W_t\) represents their connection strengths.
-- \(t\) denotes the current system state or time.
-
-The graph is not assumed to remain static.
-
-New experiences may introduce memory units, establish associations, or modify existing relationships.
-
-Unlike a conventional static knowledge representation, FLIN investigates how this evolving structure can directly participate in computation.
-
-### 3.2 Experience-Dependent Association
-
-When two memory structures repeatedly participate in related experiences, their associative relationship may become stronger.
-
-Stronger relationships can influence subsequent activation pathways.
-
-This creates a feedback relationship between experience and association:
-
-**Experience modifies connections → Connections influence future activation → Future activation interacts with new experiences**
-
-Importantly, FLIN distinguishes between direct experience and internally generated association.
-
-An internally activated memory is not automatically equivalent to a new external experience.
-
-This distinction is intended to prevent internally generated associations from being treated as equally strong evidence of the external world.
-
-### 3.3 Pulse-Based Association
-
-One of FLIN's central architectural hypotheses is that association can be modeled through signal propagation.
-
-An input activates corresponding memory structures.
-
-The resulting activation propagates through directed connections, producing a sequence of associated memory activations.
-
-The proposed pulse mechanism follows several principles:
-
-**Single-route propagation**
-
-When an associative pulse encounters multiple possible outgoing connections, it selects one route rather than automatically propagating through every available connection.
-
-**Connection-dependent routing**
-
-Connection strengths influence the selection of associative pathways.
-
-The precise probabilistic selection rule remains under investigation.
-
-**Directed transmission**
-
-Associative connections have defined transmission directions.
-
-A pulse cannot immediately reverse along the connection it just traversed.
-
-**No assumed intrinsic pulse decay**
-
-FLIN does not currently impose an arbitrary intrinsic decay law on associative pulses.
-
-Signal termination, routing cycles, and network-level constraints require further formalization.
-
-These rules are intended to make associative computation depend on the evolving organization of memory rather than on exhaustive graph traversal alone.
+| Feature | Description |
+|---|---|
+| Empty Network Initialization | Create a completely new FLIN memory network |
+| Document-Based Learning | Build memory units directly from documents |
+| Automatic SSRS Group Formation | Construct fast memory groups from repeated observations |
+| Source-Specific Groups | Preserve the document or paper responsible for each group |
+| Persistent Group Colors | Assign different colors to fast memory groups |
+| Main 3D Network Integration | Display fast groups directly inside the original memory network |
+| Group Filtering | Display all groups or focus on a specific group |
+| Group Evidence Inspection | Examine memory members and supporting observations |
+| Literature Learning Integration | Automatically update groups during literature collection |
+| Persistent SQLite Storage | Preserve memory groups across application restarts |
+| Network Export | Export groups together with the underlying memory network |
+| Historical Group Reconstruction | Rebuild groups from previously recorded evidence |
 
 ---
 
-## 4. Gate-Specific Feedback
+## 4. Installation
 
-FLIN proposes a feedback mechanism that is structurally separate from the primary associative network.
+### Requirements
 
-Each activation gate corresponds to the root of a dedicated feedback structure.
+- Python 3.10+
+- Ubuntu 24.04 recommended
+- Tkinter
+- NumPy
+- Matplotlib
+- NetworkX
+- Requests
+- BeautifulSoup4
+- Scikit-learn
+- PyMuPDF
 
-Associative pulses preserve information about the gate from which they originated.
+### Installation
 
-Feedback signals retain the same origin identification.
+Create a Python virtual environment:
 
-This allows feedback to influence the corresponding activation gate without indiscriminately affecting unrelated gates.
+```bash
+python3 -m venv .venv
+```
 
-Conceptually, FLIN separates two functions:
+Activate it:
 
-**Associative Network**
+```bash
+source .venv/bin/activate
+```
 
-Determines how activation travels between memory units.
+Install dependencies:
 
-**Feedback Network**
+```bash
+python -m pip install --upgrade pip
+python -m pip install numpy matplotlib networkx requests beautifulsoup4 scikit-learn pymupdf
+```
 
-Provides gate-specific feedback associated with the resulting activity.
+Launch FLIN:
 
-This separation is intended to support more localized and interpretable activation dynamics.
+```bash
+python FLIN_v23.py
+```
 
-The precise feedback equations, network organization, and learning effects remain subjects of theoretical development.
+Ollama is optional for document ingestion and SSRS fast group construction.
 
----
-
-## 5. From Memory Activation to Associative Response
-
-FLIN does not treat an association as merely locating a stored relationship.
-
-Instead, an associative response is produced through interactions among activated memory units.
-
-Each memory unit may produce a temporary response when relevant activation conditions are satisfied.
-
-The collective activity of multiple memory units forms an internal reaction pattern.
-
-This reaction pattern can be used to identify concepts that are most strongly associated with the current input.
-
-The intended process is:
-
-**Input → Memory Activation → Associative Propagation → Reaction Pattern → Associated Concepts**
-
-A key research question is whether useful conceptual relationships can arise from these distributed interactions without explicitly programming every possible relationship.
-
-The response mechanism is still being formalized, particularly the mathematical relationship between local activation and the relevance of resulting concepts.
+Some additional mathematical generation and evaluation features may require Ollama.
 
 ---
 
-## 6. The Central Mathematical Hypothesis
+## 5. Getting Started
 
-FLIN considers memory to be more than stored information.
+### Step 1 — Create a New Memory Network
 
-Memory also includes the lasting changes that previous experiences have made to the system's internal dynamics.
+Launch FLIN:
 
-A general representation is:
+```bash
+python FLIN_v23.py
+```
 
-\[
-M_{t+1} = F(M_t, X_t)
-\]
+Navigate to:
 
-where:
+`02A FLIN Directed Pulse Association`
 
-- \(M_t\) is the complete memory state.
-- \(X_t\) is the current effective input.
-- \(F\) describes the memory update process.
-- \(M_{t+1}\) is the resulting memory state.
+Click:
 
-The memory state includes the organization and properties of the associative network.
+`New Empty FLIN Network (no data copied)`
 
-Because the internal structure changes through experience, future responses depend on the system's accumulated history.
+This creates an independent SQLite memory network.
 
-Two systems receiving identical inputs may therefore produce different internal responses if their memory states differ.
+The new network initially contains no learned memory units or associative connections.
 
-Formally:
+### Step 2 — Import a Document
 
-\[
-M_t^{(A)} \neq M_t^{(B)}
-\]
+Click:
 
-may imply:
+`Read Document → Learn FAST Groups (TXT/PDF/MD)`
 
-\[
-R(M_t^{(A)},X_t) \neq R(M_t^{(B)},X_t)
-\]
+Supported formats include:
 
-where \(R\) represents the associative response mechanism.
+- TXT
+- PDF
+- Markdown
+- TeX
+- Other supported text-based formats
 
-This is not a claim that such history dependence is unique to FLIN.
+Select a document.
 
-Rather, FLIN's research objective is to construct a specific, testable computational mechanism in which experience-dependent memory structure governs associative dynamics.
+The learning process does not automatically begin when a file is selected.
 
-**The central hypothesis is that learning should modify the system that produces future associations, not merely expand the information available to it.**
+Click:
 
----
+`▶ 開始讀取`
 
-## 7. What Makes FLIN Different?
+To interrupt the process:
 
-FLIN does not claim that memory graphs, associative learning, signal propagation, or adaptive networks are individually new concepts.
+`■ 結束讀取`
 
-Its proposed contribution lies in combining these ideas into a specific theory of experience-driven intelligence.
+Previously completed and committed observations remain stored.
 
-### 7.1 Memory as an Active Computational Structure
+### Step 3 — Automatic Memory Construction
 
-Memory is not merely information retrieved by a separate reasoning mechanism.
+During document ingestion, FLIN attempts to:
 
-The memory network itself participates in generating associative responses.
+1. Extract document text.
+2. Divide text into effective input segments.
+3. Identify mathematical concepts.
+4. Match concepts with existing memory units.
+5. Create new memory units when necessary.
+6. Record effective input clusters.
+7. Establish or reinforce directed associations.
+8. Evaluate SSRS fast-road eligibility.
+9. Construct source-specific fast memory groups.
+10. Update the persistent memory network.
 
-### 7.2 Structural Adaptation as Learning
+New documents extend the existing network rather than automatically creating completely separate networks.
 
-Learning is represented through the formation and modification of memory units, associative connections, and activation pathways.
+### Step 4 — Visualize Memory Groups
 
-The structure that processes information evolves as experience accumulates.
+After learning, return to the main 3D memory network.
 
-### 7.3 Association Through Constrained Signal Propagation
+Fast memory groups are displayed directly in the original network.
 
-Rather than assuming that association requires exhaustive graph search, FLIN investigates selective pulse propagation governed by directed connections and their strengths.
+Different groups receive different colors.
 
-### 7.4 Separation of Association and Feedback
+Use:
 
-The architecture distinguishes associative propagation from gate-specific feedback.
+`02B SSRS Fast Memory Groups`
 
-This separation creates a research framework for studying how local feedback interacts with network-level activity.
+Available operations include:
 
-### 7.5 Memory Formation From Initial Experience
+- Display all colored groups
+- Select an individual group
+- Inspect group members
+- Inspect supporting evidence
+- Focus on a selected group
+- Show group connections in the main 3D network
 
-FLIN investigates whether a single effective experience can create a retriggerable memory structure that can subsequently participate in association and learning.
+Click:
 
-### 7.6 Knowledge Transfer Through Existing Structures
+`Inspect Groups + Evidence`
 
-A long-term hypothesis is that previously formed memory structures may help organize unfamiliar information.
+to examine the structure and evidence of each group.
 
-For example, mathematical relationships learned in one domain may provide useful structural references in another.
+### Step 5 — Continue Learning
 
-The goal is to investigate whether these relationships can support analogical transfer and the construction of new conceptual frameworks.
+Import additional documents.
 
-This capability remains a research objective rather than an experimentally demonstrated result.
+FLIN continues learning within the same selected memory network.
 
----
+Existing memory units may receive additional observations and connections.
 
-## 8. A Different Direction for AI Research
-
-FLIN is not intended to reproduce a conventional language model using a different implementation.
-
-Its research direction focuses on a different set of questions.
-
-**Can associative computation emerge directly from an evolving memory network?**
-
-**Can new experiences modify both stored knowledge and the pathways used to process future information?**
-
-**Can simple memory interactions produce increasingly complex conceptual relationships?**
-
-**Can knowledge acquired in one domain facilitate the understanding of another?**
-
-These questions motivate the development of FLIN.
-
-The project is particularly interested in the relationship between memory, learning, association, and the formation of new conceptual structures.
-
-Its long-term ambition is to investigate whether increasingly general intellectual capabilities can emerge from these mechanisms.
+New fast memory groups may emerge when the evidence requirements are satisfied.
 
 ---
 
-## 9. Current Research and Implementation
+## 6. SSRS Fast Memory Group Formation
 
-FLIN is currently in an early experimental stage.
+### 6.1 Fundamental Principle
 
-The project contains theoretical proposals and experimental software exploring parts of the proposed architecture.
+A fast memory group should not be established simply because several concepts appear somewhere in the same document.
 
-The reference implementation focuses primarily on mathematical knowledge and associations.
+FLIN considers repeated effective input observations and previously learned directed associations.
 
-Existing experimental components explore:
+The current implementation requires sufficient evidence before an association can become part of a fast memory group.
 
-- Feature extraction and memory representation
-- Memory-unit creation
-- Directed associative connections
-- Connection-strength-based routing
-- Associative activation
-- Heuristic formation of additional relationships
-- Visualization and inspection of memory networks
+This distinction is important:
 
-These components are experimental approximations.
+**Co-occurrence alone is not equivalent to a validated mathematical relationship.**
 
-They should not be interpreted as a complete implementation or scientific validation of the FLIN theory.
+### 6.2 Memory-Level Requirements
 
-In particular, the complete SSRS mechanism, gate-specific feedback architecture, and mathematically consistent pulse dynamics require further development.
+A memory unit must appear in at least two distinct effective input clusters from the same source.
 
-The project currently prioritizes theoretical consistency, computational formalization, and experimental testability.
+Default parameter:
+
+```python
+SSRS_GROUP_MIN_MENTIONS = 2
+```
+
+This requirement helps identify repeatedly observed concepts.
+
+### 6.3 Connection-Level Requirements
+
+For an association:
+
+A → B
+
+to enter a source-specific fast memory group:
+
+1. The directed connection must already exist in the associative network.
+2. It must have SSRS fast-road eligibility.
+3. The source document must provide sufficient supporting observations.
+4. The connection must satisfy the source-specific evidence threshold.
+
+Default parameter:
+
+```python
+SSRS_GROUP_MIN_PAIR_EVENTS = 2
+```
+
+### 6.4 Fast-Road Eligibility
+
+The underlying SSRS fast-road mechanism uses separate evidence thresholds.
+
+Current defaults:
+
+```python
+SSRS_EVIDENCE_MIN_CLUSTERS = 2
+SSRS_EVIDENCE_MIN_EXPOSURES = 3
+SSRS_EVIDENCE_MIN_WEIGHT = 0.5
+```
+
+These parameters describe:
+
+- Minimum number of distinct supporting input clusters
+- Minimum accumulated exposure requirement
+- Minimum associative connection weight
+
+The group formation process uses the fast roads that satisfy the underlying SSRS requirements.
+
+### 6.5 Group Construction
+
+Eligible source-supported fast roads are organized into connected groups for visualization.
+
+For example:
+
+A → B
+
+B → C
+
+may be displayed as one fast memory group.
+
+Another independent connection:
+
+D → E
+
+may form a separate group.
+
+Connectivity used for grouping is a visualization and organization rule.
+
+It does not convert directed associations into bidirectional connections.
+
+### 6.6 Performance Limits
+
+The current implementation limits the source-specific candidate inspection process.
+
+Default:
+
+```python
+SSRS_GROUP_MAX_SOURCE_MEMORIES = 160
+```
+
+This limit controls processing cost.
+
+It is not a theoretical restriction on the possible number of memory units in a fast group.
 
 ---
 
-## 10. Research Roadmap
+## 7. Group Colors and Visualization
 
-### Phase I — Theoretical Foundations
+Fast memory groups are represented using different colors in the main 3D network.
 
-Define the fundamental elements of the architecture:
+### Visual Representation
+
+| Visual Element | Meaning |
+|---|---|
+| Colored Memory Unit | Memory unit associated with a displayed SSRS fast group |
+| Thick Colored Connection | Existing directed association recognized as a source-supported fast road |
+| Blue-Gray Connection | Ordinary associative connection |
+| Uncolored Memory Unit | Memory unit outside the currently displayed groups |
+| Selected Group | Highlights the chosen source-specific fast memory group |
+
+Colors identify groups.
+
+They do not represent mathematical truth, causal certainty, or knowledge quality.
+
+### Overlapping Memory Groups
+
+A memory unit may belong to multiple groups.
+
+Example:
+
+Document A:
+
+A → B
+
+Document B:
+
+B → C
+
+Memory unit B may participate in both groups.
+
+FLIN does not create two separate copies of B.
+
+The same memory unit is shared.
+
+When all groups are displayed, a memory unit receives one display color.
+
+Selecting an individual group allows users to inspect its membership and connections independently.
+
+### Interactive 3D Network
+
+The main visualization supports interactive operations such as:
+
+- Rotation
+- Zooming
+- Memory selection
+- Group inspection
+- Connection exploration
+- Group-focused visualization
+
+For performance reasons, the 3D visualization may display a subset of the complete stored network.
+
+The SQLite database remains the authoritative source of memory and connection data.
+
+---
+
+## 8. Literature-Based Automatic Network Construction
+
+FLIN can also construct its memory network using mathematical research literature.
+
+Instead of manually importing individual documents, users may start the literature collection pipeline.
+
+Click:
+
+`Start Building (Literature → FLIN)`
+
+The system uses its existing literature collection and filtering mechanisms.
+
+Potential sources include:
+
+- Wikipedia
+- arXiv
+- Crossref
+- OpenAlex, when configured
+- Previously collected local literature
+
+Retrieved mathematical information can enter the FLIN learning pipeline.
+
+Each document or paper contributes observations to the shared memory network.
+
+After relevant input and associative processing, FLIN evaluates whether the source supports SSRS fast memory groups.
+
+This makes document-based learning and literature-based network construction part of the same architecture.
+
+---
+
+## 9. Database Architecture
+
+FLIN stores its memory network in SQLite.
+
+### Main Tables
+
+| Table | Purpose |
+|---|---|
+| `abc_units` | Persistent memory units |
+| `abc_edges` | Directed associative connections |
+| `abc_input_clusters` | Effective input clusters and their sources |
+| `abc_cluster_features` | Memory units identified within input clusters |
+| `ssrs_fast_roads` | SSRS high-speed transmission connections |
+| `ssrs_road_evidence` | Evidence supporting fast-road eligibility |
+| `ssrs_memory_groups` | Persistent fast memory group definitions |
+| `ssrs_memory_group_members` | Membership relationships |
+| `ssrs_memory_group_roads` | Fast roads belonging to individual groups |
+| `ssrs_document_reads` | Document ingestion records |
+| `ssrs_document_read_sessions` | Document reading session states |
+
+### Data Persistence
+
+Memory units, associations, fast roads, and fast memory groups are stored persistently.
+
+Closing FLIN does not automatically reset the network.
+
+Different networks can be created and selected independently.
+
+Default storage location:
+
+```text
+~/.local/share/brain_project/
+```
+
+Independent networks:
+
+```text
+~/.local/share/brain_project/networks/
+```
+
+Network registry:
+
+```text
+~/.local/share/brain_project/network_registry.json
+```
+
+Shared literature catalog:
+
+```text
+~/.local/share/brain_project/literature_catalog.sqlite3
+```
+
+---
+
+## 10. Command-Line Interface
+
+FLIN provides command-line utilities for testing and network management.
+
+### Run Self-Test
+
+```bash
+python FLIN_v23.py --ssrs-self-test
+```
+
+The self-test uses temporary SQLite data.
+
+It does not intentionally modify the user's existing research network.
+
+### Generate an Example Mathematical Document
+
+```bash
+python FLIN_v23.py --ssrs-example example_math.txt
+```
+
+This generates a synthetic mathematical document for testing.
+
+It is not a real academic research paper.
+
+### Create a New Network
+
+```bash
+python FLIN_v23.py --new-network "FLIN_SSRS_Experiment"
+```
+
+### Read a Document
+
+```bash
+python FLIN_v23.py --ssrs-read-document example_math.txt
+```
+
+The document is processed into the currently selected network.
+
+### Inspect Fast Memory Groups
+
+```bash
+python FLIN_v23.py --ssrs-groups-report
+```
+
+### Rebuild Groups From Existing Evidence
+
+```bash
+python FLIN_v23.py --ssrs-rebuild-groups 300
+```
+
+### Inspect SSRS Fast Roads
+
+```bash
+python FLIN_v23.py --ssrs-report
+```
+
+### List Available Networks
+
+```bash
+python FLIN_v23.py --list-networks
+```
+
+---
+
+## 11. Exporting and Backing Up Networks
+
+FLIN supports persistent network export.
+
+Users can export network data using the existing network export functions.
+
+Supported export approaches include:
+
+- Complete SQLite snapshot
+- Portable JSONL-based network export
+
+Version 23 includes SSRS group information in the exported network data.
+
+Relevant information includes:
 
 - Memory units
-- Effective input clusters
-- Memory formation
-- Directed associations
-- Associative pulses
-- SSRS
-- Feedback mechanisms
+- Associative connections
+- Fast roads
+- Fast memory groups
+- Group members
+- Group road membership
+- Supporting evidence
 
-**Objective:** Establish a coherent theoretical model.
+For a complete application backup, use the full SQLite export.
 
-### Phase II — Mathematical Formalization
-
-Develop mathematical descriptions of:
-
-- Memory-state transitions
-- Association-strength updates
-- Pulse routing
-- Activation thresholds
-- Feedback dynamics
-- Network evolution
-
-**Objective:** Transform theoretical descriptions into precise, implementable rules.
-
-### Phase III — Experimental Architecture
-
-Build a reference implementation that reproduces the specified dynamics.
-
-Investigate how different memory structures and learning histories influence associative behavior.
-
-**Objective:** Determine whether the proposed mechanisms can be implemented consistently.
-
-### Phase IV — Scientific Validation
-
-Design controlled experiments comparing FLIN with relevant alternative methods.
-
-Potential baselines include conventional knowledge-graph traversal, weighted random walks, and embedding-based retrieval.
-
-Research questions include:
-
-- Does FLIN form useful associations from limited experience?
-- Does structural adaptation improve subsequent associative behavior?
-- How does associative performance change as the memory network grows?
-- Can FLIN identify relationships not explicitly stored as direct connections?
-- What computational costs are introduced by pulse-based processing?
-
-**Objective:** Identify which FLIN hypotheses are supported, unsupported, or require revision.
-
-### Phase V — Knowledge Transfer
-
-Investigate whether structural relationships learned in one domain can support learning in another.
-
-Potential experiments include mathematical analogy, conceptual abstraction, and cross-domain relationship discovery.
-
-**Objective:** Test whether experience-driven associative structures can support transferable conceptual knowledge.
+A visual screenshot of the network is not equivalent to a complete network backup.
 
 ---
 
-## 11. Research Philosophy
+## 12. Recommended Experiments
 
-FLIN follows three principles.
+The purpose of FLIN is not simply to maximize the number of generated memory units.
 
-### Theory Before Complexity
+A meaningful experiment should evaluate whether the network captures useful structural information.
 
-Increasing implementation complexity does not necessarily produce a better theory of intelligence.
+### Experiment A — Single Document Learning
 
-The priority is to define simple mechanisms whose behavior can be understood, simulated, and tested.
+Create an empty network.
 
-### Experience Before Static Knowledge
+Import a mathematical document.
 
-Knowledge is not treated solely as a collection of facts.
+Measure:
 
-The organization of memory and the history of interaction are fundamental parts of the system.
+1. Number of extracted mathematical concepts
+2. Number of memory units created
+3. Number of directed associations established
+4. Number of SSRS fast roads formed
+5. Number of fast memory groups generated
+6. Supporting evidence for each group
 
-### Falsifiability Before Claims
+Compare the resulting structure with manually identified concepts.
 
-FLIN is a research hypothesis.
+### Experiment B — Repeated Document Ingestion
 
-Its theoretical mechanisms must be evaluated through reproducible experiments rather than justified by architectural resemblance to biological intelligence.
+Import the same document again.
 
-The purpose of the project is not to assume that the proposed architecture works.
+Check whether previously processed source observations are handled consistently.
 
-It is to determine whether it works, under what conditions, and why.
+Duplicate ingestion should not artificially increase observation strength when the same source positions have already been recorded.
+
+### Experiment C — Multi-Document Learning
+
+Import multiple documents covering related mathematical topics.
+
+Examples:
+
+- Linear Algebra
+- Spectral Theory
+- Differential Equations
+- Numerical Analysis
+
+Observe whether different documents produce partially overlapping fast memory groups.
+
+Check whether shared mathematical concepts remain represented by the same underlying memory units.
+
+### Experiment D — Association and Fast Transmission
+
+Select a memory unit and execute an associative pulse simulation.
+
+Observe:
+
+- Ordinary associative hops
+- SSRS fast hops
+- Activated memory units
+- Traversed pathways
+
+A fast road existing in the database does not mean every pulse must traverse it.
+
+### Experiment E — Knowledge Structure Evaluation
+
+Create a manually annotated reference network.
+
+Compare it with the network produced by FLIN.
+
+Suggested metrics:
+
+**Precision**
+
+How many extracted associations correspond to valid reference relationships?
+
+**Recall**
+
+How many important reference relationships were successfully recovered?
+
+**Group Stability**
+
+How consistent are the resulting groups under controlled repeated experiments?
+
+**Source Consistency**
+
+How accurately do group members and connections correspond to evidence in the original documents?
+
+These measurements provide stronger evidence of learning performance than node counts alone.
 
 ---
 
-## 12. Long-Term Vision
+## 13. Known Limitations
 
-FLIN is motivated by a larger goal:
+FLIN v23 remains an experimental research prototype.
 
-**Building systems that can use existing knowledge to construct, examine, and internalize new knowledge.**
+### Mathematical Understanding
 
-A system capable of meaningful learning should not merely accumulate information.
+The current document learning process relies primarily on text extraction and rule-based mathematical concept identification.
 
-It should develop increasingly useful internal relationships through experience.
+It does not guarantee complete understanding of:
 
-Ideally, knowledge acquired today should influence how the system interprets unfamiliar situations tomorrow.
+- Mathematical proofs
+- Symbolic expressions
+- Formula semantics
+- Theorem dependencies
+- Mathematical equivalence
 
-Ultimately, FLIN aims to explore a form of artificial intelligence in which memory, learning, and association are not separate capabilities, but interacting aspects of the same computational process.
+### PDF Extraction
+
+Text-based PDFs are supported.
+
+Scanned image PDFs may require OCR.
+
+Complex mathematical formatting can cause extraction errors.
+
+Current document-processing limits include:
+
+- Maximum file size: 35 MB
+- Maximum PDF pages processed: 120
+- Maximum extracted characters: 650,000
+- Maximum text segments: 650
+
+These limits are implementation constraints.
+
+### Association Quality
+
+Repeated co-occurrence does not necessarily imply a meaningful mathematical relationship.
+
+FLIN records and reinforces observations according to its current associative learning rules.
+
+Further research is required to establish whether its learned structures consistently represent mathematical knowledge.
+
+### Visualization
+
+The main 3D network uses performance-conscious sampling.
+
+Not every memory unit or edge is necessarily visible simultaneously.
+
+Display colors are identifiers, not confidence scores.
+
+### Research Validation
+
+The current implementation has been tested for core document learning, persistence, SSRS group construction, visualization, and related functions.
+
+Large-scale academic literature collection still depends on external services, available research materials, and computing resources.
 
 ---
 
-## Project Status
+## 14. Research Roadmap
 
-**Research stage:** Early theoretical and experimental development
+FLIN is part of the broader Brain_Project research initiative.
 
-**Primary research domain:** Associative memory and experience-driven learning
+Its long-term direction is to investigate how structured experience and associative memory can support the development of intelligent systems.
 
-**Reference implementation domain:** Mathematics
+Potential research directions include:
 
-**Long-term research direction:** Generalizable associative intelligence
+### Phase 1 — Persistent Associative Memory
 
-FLIN does not currently demonstrate human-level reasoning, autonomous scientific discovery, or general intelligence.
+Construct and maintain an experience-driven memory network.
 
-These remain potential long-term research directions whose feasibility must be established experimentally.
+### Phase 2 — Fast Memory Group Formation
+
+Use repeated observations to establish source-grounded SSRS transmission pathways.
+
+### Phase 3 — Knowledge Structure Evaluation
+
+Determine whether fast memory groups reflect meaningful conceptual structures.
+
+### Phase 4 — Cross-Document Association
+
+Study how concepts learned from separate documents interact within a shared memory network.
+
+### Phase 5 — Cross-Domain Knowledge Transfer
+
+Investigate whether previously learned structures can support the formation of new conceptual relationships in unfamiliar domains.
+
+### Phase 6 — Generalized Intelligent Behavior
+
+Explore whether associative memory, structured experience, and adaptive routing can contribute to broader reasoning and learning capabilities.
+
+These phases represent research objectives rather than demonstrated capabilities.
 
 ---
 
-## Contributing
+## 15. Project Philosophy
 
-FLIN is an open research project.
+FLIN is based on the idea that intelligence may depend not only on how much information a system stores, but also on how previous experiences influence its future responses.
 
-Contributions involving computational modeling, mathematical formalization, neuroscience-inspired mechanisms, associative learning, graph dynamics, and experimental validation are welcome.
+The project investigates whether repeated experiences can gradually shape a persistent associative network and create more efficient pathways for information transmission.
 
-The project particularly welcomes constructive criticism, alternative hypotheses, and reproducible experimental methods.
+The central research question is:
 
-For further theoretical documentation, see [FLIN Theory](docs/FLIN_THEORY.md).
+**How can a system use its existing knowledge structures to construct, connect, and internalize previously unknown knowledge?**
+
+Rather than treating intelligence as a collection of independent benchmark capabilities, FLIN explores the mechanisms through which memory structures may develop and reorganize through experience.
 
 ---
 
-## Final Thought
+## 16. Project Status
 
-> Intelligence may not be determined solely by how much a system knows, but by how its accumulated experiences change the way it understands what comes next.
+**Current Version:** FLIN v23.0
+
+**Project:** Brain_Project
+
+**System:** Feature-Link Intelligence Network
+
+**Primary Language:** Python
+
+**Interface:** Desktop GUI with interactive 3D visualization
+
+**Storage:** SQLite
+
+**Primary Research Areas:**
+
+- Associative Memory
+- Brain-Inspired Artificial Intelligence
+- Experience-Driven Learning
+- Dynamic Memory Networks
+- Mathematical Knowledge Representation
+- Fast Transmission Pathways
+
+FLIN is an actively developed research prototype.
+
+Its architecture and learning mechanisms may evolve as experiments reveal new requirements.
+
+---
+
+## Final Research Objective
+
+The ultimate goal of FLIN is not merely to create a larger knowledge database.
+
+It is to investigate whether an intelligent system can continuously construct and reorganize its own memory structures from experience, allowing previously learned knowledge to influence how new information is interpreted and connected.
 
 **FLIN — Rethinking How AI Learns.**
