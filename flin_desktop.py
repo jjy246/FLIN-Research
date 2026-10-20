@@ -14,6 +14,7 @@ import argparse
 import gzip
 import datetime
 import contextlib
+import colorsys
 import ipaddress
 import json
 import math
@@ -41,7 +42,7 @@ from pathlib import Path
 import matplotlib
 # Maintenance commands must also work over SSH without a DISPLAY.
 _CLI_HEADLESS = any(flag in sys.argv for flag in (
-    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--ssrs-self-test','--help','-h'))
+    '--catalog-info','--catalog-search','--catalog-import-network','--catalog-backfill-keys','--source-info','--diagnose','--flin-discovery-info','--flin-source-report','--flin-association-audit','--flin-repair-associations','--flin-efficiency-report','--flin-retrofit','--flin-retrofit-limit','--purity-report','--purity-clean','--audit-math-quality','--export-curated-network','--build-fast-index','--import-openalex','--export-network','--list-networks','--new-network','--switch-network','--import-network','--domain','--cpu-info','--math-coverage','--display-check','--abc-info','--flin-info','--abc-enable','--flin-enable','--abc-learn-existing','--flin-learn-existing','--abc-simulate','--flin-simulate','--abc-create-network','--flin-create-network','--abc-reconcile','--flin-reconcile','--abc-clusters','--flin-clusters','--abc-pulse-rate','--flin-pulse-rate','--abc-duration','--flin-duration','--abc-threshold','--flin-threshold','--abc-window','--flin-window','--abc-revisits','--flin-revisits','--verify-export','--flin-bridges','--flin-related','--ssrs-read-document','--ssrs-report','--ssrs-example','--ssrs-groups-report','--ssrs-rebuild-groups','--ssrs-self-test','--help','-h'))
 matplotlib.use('Agg' if _CLI_HEADLESS else 'TkAgg')
 import matplotlib.pyplot as plt
 # Ensure CJK captions render when a Noto CJK font is installed.
@@ -81,7 +82,7 @@ else:
     except AttributeError:
         pass  # Older PyMuPDF builds may lack this control.
 
-APP_TITLE = "FLIN — Feature-Link Intelligence Network | SSRS Document Lab v22.0"
+APP_TITLE = "FLIN — Feature-Link Intelligence Network | Source-Grounded Fast Memory Groups v23.0"
 
 
 def _flin_linux_cgroup_resources():
@@ -1497,7 +1498,8 @@ def database(path=None) -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 EXPORT_CORE_TABLES = ('units', 'edges', 'positions', 'network_meta',
                       'abc_units','abc_edges','abc_ssrs','abc_meta','ssrs_fast_roads','ssrs_road_evidence','ssrs_document_reads',
-                       'abc_sources','abc_source_topics','abc_topics','abc_positions')
+                       'abc_sources','abc_source_topics','abc_topics','abc_positions',
+                       'ssrs_memory_groups','ssrs_memory_group_members','ssrs_memory_group_roads')
 EXPORT_PROVENANCE_TABLES = (
     'theories', 'papers', 'paper_theories', 'paper_math_applications', 'mentions', 'relation_evidence',
     'unit_terms', 'wikipedia_references', 'wikipedia_reference_scans',
@@ -6567,6 +6569,31 @@ def abc_schema(con):
         );
         CREATE INDEX IF NOT EXISTS idx_ssrs_road_evidence_source
           ON ssrs_road_evidence(source_id,src,dst);
+        -- v23: SSRS fast-memory groups are views over EXISTING units and
+        -- existing directed fast roads. Each component is supported by one
+        -- concrete source's independently positioned input clusters.
+        CREATE TABLE IF NOT EXISTS ssrs_memory_groups(
+          id TEXT PRIMARY KEY, source_id TEXT NOT NULL,
+          title TEXT NOT NULL, color TEXT NOT NULL,
+          node_count INTEGER NOT NULL DEFAULT 0,
+          road_count INTEGER NOT NULL DEFAULT 0,
+          support INTEGER NOT NULL DEFAULT 0,
+          updated TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssrs_groups_source
+          ON ssrs_memory_groups(source_id);
+        CREATE TABLE IF NOT EXISTS ssrs_memory_group_members(
+          group_id TEXT NOT NULL, unit_id TEXT NOT NULL,
+          mentions INTEGER NOT NULL,
+          PRIMARY KEY(group_id,unit_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_ssrs_group_members_unit
+          ON ssrs_memory_group_members(unit_id,group_id);
+        CREATE TABLE IF NOT EXISTS ssrs_memory_group_roads(
+          group_id TEXT NOT NULL, src TEXT NOT NULL, dst TEXT NOT NULL,
+          source_support INTEGER NOT NULL,
+          PRIMARY KEY(group_id,src,dst)
+        );
         CREATE TABLE IF NOT EXISTS ssrs_document_reads(
           document_id TEXT PRIMARY KEY, filename TEXT NOT NULL,
           file_sha256 TEXT NOT NULL, content_chars INTEGER NOT NULL,
@@ -7342,6 +7369,150 @@ def flin_association_health(con):
                'isolated nodes and link observations; repair cached sources incrementally.')}
 
 
+# ---------------------------------------------------------------------------
+# SSRS FAST MEMORY GROUPS (v23)
+# A group does not merge/create a memory or add edges. A document's repeatedly
+# observed directed *fast* roads are partitioned into connected components for
+# coloring and inspection. Transport remains one directed edge per pulse step.
+# ---------------------------------------------------------------------------
+SSRS_GROUP_MIN_MENTIONS = 2  # per source and independent input position
+SSRS_GROUP_MIN_PAIR_EVENTS = 2
+SSRS_GROUP_MAX_SOURCE_MEMORIES = 160
+
+
+def flin_ssrs_group_rebuild(con, source_id):
+    """Materialize source-specific components of verified fast roads, idempotently.
+
+    Mere membership in the same PDF never creates an association or fast road.
+    The edge must exist in abc_edges AND ssrs_fast_roads with >=2 local input
+    events, and each endpoint must appear >=2 times in that same source.
+    """
+    source_id = str(source_id or '')
+    if not source_id:
+        return {'groups': 0, 'members': 0, 'roads': 0}
+    frequent = dict(con.execute('''SELECT f.unit_id, COUNT(DISTINCT f.cluster_id) n
+        FROM abc_cluster_features f JOIN abc_input_clusters c ON c.id=f.cluster_id
+        JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
+        WHERE c.paper_id=? GROUP BY f.unit_id HAVING n>=?
+        ORDER BY n DESC,f.unit_id LIMIT ?''',
+        (source_id, SSRS_GROUP_MIN_MENTIONS, SSRS_GROUP_MAX_SOURCE_MEMORIES)))
+    valid = set(frequent)
+    # Indexed by source_id, avoiding global scans of the full graph.
+    supported = con.execute('''SELECT ev.src,ev.dst,COUNT(DISTINCT ev.cluster_id) n
+        FROM ssrs_road_evidence ev
+        JOIN ssrs_fast_roads r ON r.src=ev.src AND r.dst=ev.dst
+        JOIN abc_edges e ON e.src=ev.src AND e.dst=ev.dst
+        WHERE ev.source_id=? GROUP BY ev.src,ev.dst HAVING n>=?''',
+        (source_id, SSRS_GROUP_MIN_PAIR_EVENTS)).fetchall() if len(valid)>=2 else []
+    adjacency = defaultdict(set)
+    road_rows = []
+    for a,b,n in supported:
+        if a in valid and b in valid and a!=b:
+            adjacency[a].add(b)
+            adjacency[b].add(a)  # visualization COMPONENT only; no reverse road
+            road_rows.append((a,b,int(n)))
+    components = []
+    visited = set()
+    for start in sorted(adjacency):
+        if start in visited:
+            continue
+        todo=[start]; visited.add(start); members=set()
+        while todo:
+            unit=todo.pop(); members.add(unit)
+            for neighbor in adjacency[unit]-visited:
+                visited.add(neighbor);todo.append(neighbor)
+        if len(members)>=2:
+            roads=[r for r in road_rows if r[0] in members and r[1] in members]
+            components.append((members,roads))
+    components.sort(key=lambda x:(-sum(frequent[m] for m in x[0]),-len(x[1]),min(x[0])))
+    row=con.execute('SELECT title FROM abc_sources WHERE id=?', (source_id,)).fetchone()
+    if not row:
+        row=con.execute('SELECT filename FROM ssrs_document_reads WHERE document_id=?',
+                        (source_id,)).fetchone()
+    if not row:
+        row=con.execute('SELECT title FROM abc_sources WHERE id=?', ('paper:'+source_id,)).fetchone()
+    source_label=(row[0] if row else source_id)[:160]
+    seed=int(hashlib.sha256(source_id.encode('utf-8')).hexdigest()[:8],16)/0xffffffff
+    with con:
+        # Rebuild one source atomically; no stale disconnected groups survive.
+        previous=[r[0] for r in con.execute('SELECT id FROM ssrs_memory_groups WHERE source_id=?',(source_id,))]
+        if previous:
+            con.execute('DELETE FROM ssrs_memory_group_members WHERE group_id IN ('+
+                        ','.join('?' for _ in previous)+')',previous)
+            con.execute('DELETE FROM ssrs_memory_group_roads WHERE group_id IN ('+
+                        ','.join('?' for _ in previous)+')',previous)
+        con.execute('DELETE FROM ssrs_memory_groups WHERE source_id=?',(source_id,))
+        for idx,(members,roads) in enumerate(components):
+            anchor=min(members)
+            gid='ssrs-group:'+hashlib.sha256((source_id+'|'+anchor).encode('utf-8')).hexdigest()[:24]
+            hue=(seed+idx*0.61803398875)%1.0
+            red,green,blue=colorsys.hsv_to_rgb(hue,.73,1.0)
+            color='#'+''.join(f'{int(255*x):02x}' for x in (red,green,blue))
+            group_title=f'{source_label} · {idx+1}'
+            con.execute('''INSERT INTO ssrs_memory_groups
+                (id,source_id,title,color,node_count,road_count,support)
+                VALUES(?,?,?,?,?,?,?)''',
+                (gid,source_id,group_title,color,len(members),len(roads),
+                 sum(n for _,_,n in roads)))
+            con.executemany('''INSERT INTO ssrs_memory_group_members
+                (group_id,unit_id,mentions) VALUES(?,?,?)''',
+                [(gid,uid,frequent[uid]) for uid in sorted(members)])
+            con.executemany('''INSERT INTO ssrs_memory_group_roads
+                (group_id,src,dst,source_support) VALUES(?,?,?,?)''',
+                [(gid,a,b,n) for a,b,n in roads])
+    return {'groups': len(components),
+            'members': sum(len(c[0]) for c in components),
+            'roads': sum(len(c[1]) for c in components)}
+
+
+def flin_ssrs_list_groups(con, *, source_id=None, limit=80, include_members=True):
+    """Read persisted colored groups with their REAL directed roads and citations."""
+    params = ((str(source_id),) if source_id else ())
+    where = 'WHERE g.source_id=?' if source_id else ''
+    rows=con.execute('''SELECT g.id,g.source_id,g.title,g.color,g.node_count,
+        g.road_count,g.support FROM ssrs_memory_groups g '''+where+
+        ' ORDER BY g.support DESC,g.node_count DESC,g.id LIMIT ?',
+        params+(max(1,min(400,int(limit))),)).fetchall()
+    items=[]
+    for gid,sid,title,color,nodes,roads,support in rows:
+        result={'id':gid,'source_id':sid,'title':title,'color':color,
+                'node_count':nodes,'road_count':roads,'support':support}
+        if include_members:
+            result['members']=[{'id':uid,'label':label,'mentions':n}
+                for uid,label,n in con.execute('''SELECT m.unit_id,u.label,m.mentions
+                 FROM ssrs_memory_group_members m JOIN abc_units u ON u.id=m.unit_id
+                 WHERE m.group_id=? ORDER BY m.mentions DESC,u.label''',(gid,))]
+            result['roads']=[{'src':a,'dst':b,'source_support':n,
+                'source':al,'target':bl}
+                for a,b,n,al,bl in con.execute('''SELECT r.src,r.dst,r.source_support,
+                 ua.label,ub.label FROM ssrs_memory_group_roads r
+                 JOIN abc_units ua ON ua.id=r.src JOIN abc_units ub ON ub.id=r.dst
+                 WHERE r.group_id=? ORDER BY r.source_support DESC LIMIT 200''',(gid,))]
+        items.append(result)
+    return items
+
+
+def flin_ssrs_rebuild_existing_groups(con, *, limit=300, stop_event=None):
+    """Incremental migration for legacy documents and already-indexed papers."""
+    abc_schema(con)
+    key='ssrs_group_backfill_cursor_v23'
+    row=con.execute('SELECT value FROM abc_meta WHERE key=?',(key,)).fetchone()
+    cursor=row[0] if row else ''
+    limit=max(1,min(10000,int(limit)))
+    source_ids=con.execute('''SELECT DISTINCT paper_id FROM abc_input_clusters
+       WHERE paper_id>? ORDER BY paper_id LIMIT ?''',(cursor,limit)).fetchall()
+    total=created=0
+    for (source_id,) in source_ids:
+        if stop_event is not None and stop_event.is_set():break
+        report=flin_ssrs_group_rebuild(con,source_id)
+        total+=1;created+=report['groups']
+        with con:con.execute('INSERT OR REPLACE INTO abc_meta(key,value) VALUES(?,?)',
+                             (key,source_id))
+    return {'sources_processed':total,'groups_found':created,
+            'finished':len(source_ids)<limit and total==len(source_ids),
+            'last_source':source_ids[total-1][0] if total else cursor}
+
+
 def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', url='',
                                *, prepared_clusters=None, document_event_namespace=''):
 
@@ -7366,7 +7537,10 @@ def abc_ingest_online_clusters(con, paper_id, title, abstract='', fulltext='', u
     replay=abc_reconcile_pending(con,limit=600 if document_event_namespace else 400,
         source_filter=str(paper_id) if document_event_namespace else None)
     edges+=replay['edges']
+    group_info=(flin_ssrs_group_rebuild(con,paper_id) if done and
+                not document_event_namespace else {'groups':0,'members':0,'roads':0})
     return {'clusters':done,'promoted':promoted,'edges':edges,'extracted':len(clusters),
+            'ssrs_groups':group_info['groups'],
             'new_links':replay['new_links'], 'reinforcements':replay['reinforcements'],
             'omitted_due_to_cluster_cap':extraction_stats.get('omitted_due_to_cluster_cap',0)}
 
@@ -7966,6 +8140,8 @@ def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
             cap_omissions+=item.get('omitted_due_to_cluster_cap',0)
             clusters+=item['clusters'];units+=item['promoted'];links+=item['edges']
             processed+=1
+            if processed%8==0 and clusters:
+                flin_ssrs_group_rebuild(con,doc_id)
             now=time.monotonic()
             if progress and (i==0 or i+1==len(sections) or i%3==0 or now-last_update>0.6):
                 snapshot=flin_ssrs_report(con,limit=80,source_id=doc_id)
@@ -7995,7 +8171,10 @@ def flin_ssrs_read_document(con, path, *, progress=None, stop_event=None):
         warnings.append(f'{empty_sections}/{processed} processed sections had no qualifying mathematical input clusters.')
     if cap_omissions:
         warnings.append(f'{cap_omissions} valid-looking input events exceeded the per-section extraction budget and were NOT ingested.')
+    group_summary=flin_ssrs_group_rebuild(con,doc_id)
     report=flin_ssrs_report(con,limit=200,source_id=doc_id)
+    report['ssrs_memory_groups']=flin_ssrs_list_groups(con,source_id=doc_id)
+    report['ssrs_group_count']=group_summary['groups']
     important=con.execute('''SELECT u.label,COUNT(DISTINCT f.cluster_id) AS frequency
         FROM abc_input_clusters c JOIN abc_cluster_features f ON f.cluster_id=c.id
         JOIN abc_units u ON u.id=f.unit_id AND u.status='active'
@@ -8028,6 +8207,8 @@ def flin_ssrs_self_test():
         with contextlib.closing(database(path=root/'test.sqlite3')) as con:
             original=flin_ssrs_read_document(con,sample)
             assert original['roads']>=1, 'Sample should form at least one SSRS road.'
+            assert original['ssrs_group_count']>=1, 'Repeated source roads must form a colored group.'
+            assert flin_ssrs_list_groups(con,source_id=original['source_id']), 'Groups must persist.'
             assert original['candidate_links']>=1, 'Unpromoted links must be visible.'
             assert original['document_clusters_total']>0
             assert original['sections_processed']==original['sections_total']
@@ -8074,6 +8255,7 @@ def flin_ssrs_self_test():
                  'memories':original['document_memories_total'],
                  'directed_links':original['document_links_total'],
                  'fast_roads':original['roads'],
+                 'colored_fast_groups':original['ssrs_group_count'],
                  'candidates':original['candidate_links']},
                  'idempotent_second_read':repeated['clusters_added']==0,
                  'repeat_position_events':multiple['document_clusters_total'],
@@ -8947,12 +9129,34 @@ class NetworkWindow:
                    command=self.flin_ui_retrofit,style='Dark.TButton').pack(fill='x',pady=(5,1))
         ttk.Button(box,text='Shortcut and Cost Report',
                    command=self.flin_ui_cost_report,style='Dark.TButton').pack(fill='x',pady=(2,1))
-        ttk.Button(box,text='Read Document → SSRS Live Roads (TXT/PDF/MD)',
+        ttk.Button(box,text='Read Document → Learn FAST Groups (TXT/PDF/MD)',
                    command=self.flin_ssrs_document_window,
                    style='Accent.TButton').pack(fill='x',pady=(7,2))
         ttk.Button(box,text='Create Sample Mathematics Article (.txt)',
                    command=self.flin_ssrs_create_example,
                    style='Dark.TButton').pack(fill='x',pady=(2,1))
+
+        box=self._group(inside,'02B  SSRS Fast Memory Groups',
+            'Learning a document or paper creates source-grounded FAST groups in the SAME memory network. '
+            'Each color identifies a source-supported group; a memory may belong to multiple groups.')
+        self.ssrs_group_choice=tk.StringVar(value='All colored groups')
+        self.ssrs_group_choice_ids={'All colored groups':None,'No group colors':'none'}
+        self.ssrs_group_combo=ttk.Combobox(box,textvariable=self.ssrs_group_choice,
+            values=list(self.ssrs_group_choice_ids),state='readonly',style='Dark.TCombobox')
+        self.ssrs_group_combo.pack(fill='x',pady=(3,4))
+        self.ssrs_group_combo.bind('<<ComboboxSelected>>',lambda event:self.ssrs_group_choice_changed())
+        self.ssrs_group_summary=tk.StringVar(value='Fast groups: 0 | created from repeated source observations')
+        self.label(box,'',textvariable=self.ssrs_group_summary,note=True,wraplength=345).pack(anchor='w')
+        self.ssrs_group_legend=ttk.Frame(box,style='Side.TFrame')
+        self.ssrs_group_legend.pack(fill='x',pady=(4,3))
+        row=self._row(box)
+        ttk.Button(row,text='Inspect Groups + Evidence',command=self.flin_ssrs_groups_window,
+                   style='Accent.TButton').pack(side='left',expand=True,fill='x',padx=(0,4))
+        ttk.Button(row,text='Refresh 3D',command=self.reload_network,
+                   style='Dark.TButton').pack(side='left',fill='x')
+        self.label(box,'Colored lines = existing directed SSRS fast roads. '
+                   'Gray lines = normal learned links. Selecting one group isolates overlapping group membership.',
+                   note=True,wraplength=345).pack(anchor='w',pady=(3,0))
 
         # FLIN's public research output: a broad list of associations from real
         # weighted single-path walks. There is no question generation or LLM UI.
@@ -9177,7 +9381,7 @@ class NetworkWindow:
             return
         if not messagebox.askyesno('Create a Separate FLIN Network',
             'Create a new isolated mathematics network; existing databases and indexes will be retained.\n'
-            'New sources undergo mathematics screening before FLIN learning. Continue?',parent=self.root):
+            'You may read a local math document immediately or start literature discovery. Continue?',parent=self.root):
             return
         try:
             name='FLIN_Mathematics_'+datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -9185,7 +9389,7 @@ class NetworkWindow:
             if not self._activate_network(netid):return
             with database() as con:abc_enable(con)
             self.abc_refresh_status()
-            messagebox.showinfo('Created','Switched to '+name+'.\nYou can now click Start Building to collect mathematical literature.',parent=self.root)
+            messagebox.showinfo('Created','Switched to '+name+'.\nYou can now read a math document or start collecting literature; both learn in the same FLIN graph.',parent=self.root)
         except Exception as exc:
             messagebox.showerror('Creation Failed',str(exc),parent=self.root)
 
@@ -9941,6 +10145,9 @@ class NetworkWindow:
                        f"本次新輸入叢集 {snapshot['input_clusters']}｜"
                        f"重複未增強 {snapshot.get('skipped_duplicates',0)}")
                     render(snapshot['ssrs'])
+                    if part>0 and part%16==0 and part!=current.get('last_main_refresh_section'):
+                        current['last_main_refresh_section']=part
+                        self.reload_network()
             if outcome:
                 typ,info=outcome
                 current['active']=False
@@ -9968,6 +10175,9 @@ class NetworkWindow:
                     if not info['roads']:
                         write_log('尚無正式 SSRS 道路：請看「單向連結 / SSRS」頁的候選道路、曝光次數及缺少條件。')
                     self.abc_refresh_status()
+                    self.reload_network()   # Direct integration into the primary 3D memory graph.
+                    if info.get('ssrs_group_count'):
+                        write_log(f"同步主記憶網路：建立/更新 {info['ssrs_group_count']} 個可上色 SSRS 快速記憶元組。")
                 elif typ=='stopped':
                     phase_var.set('已取消擷取：'+str(info)+'；沒有開始本次學習。')
                     write_log(phase_var.get())
@@ -10179,6 +10389,11 @@ class NetworkWindow:
             self.focus_ids = set()
             self._focus_result_ids = []
             self._local_focus_ids = None
+            # Switching between independent SQLite files must not carry over a
+            # group-id filter from the former network.
+            self._ssrs_selected_group_id = None
+            self._flin_visible_group_colors = {}
+            self._flin_visible_group_roads = []
             self._stats_cache = None
             self.zoom = 1.0
             self.axis_xlim = None
@@ -12332,6 +12547,17 @@ class NetworkWindow:
             if groups.get(group):
                 ax.add_collection3d(Line3DCollection(groups[group],colors=color,
                                      alpha=alpha,linewidths=width))
+        # Persisted source groups are an overlay on the SAME 3D memory graph.
+        # This does not create extra links: all roads already exist as real
+        # directed abc_edges AND as SSRS fast roads. Colors identify the source.
+        group_segments=defaultdict(list)
+        for gid,color,u,v in getattr(self,'_flin_visible_group_roads',()):
+            if u in self.coords and v in self.coords:
+                group_segments[(gid,color)].append((self.coords[u],self.coords[v]))
+        for (gid,color),segments in group_segments.items():
+            ax.add_collection3d(Line3DCollection(segments,colors=color,
+                linewidths=2.6,alpha=.94))
+        colored_nodes=getattr(self,'_flin_visible_group_colors',{})
         for kind in ('concept','candidate','relation','paper','theory'):
             spec=NODE_STYLES[kind]
             keys=[k for k in self.plot_data if self.plot_data[k]['kind']==kind]
@@ -12339,17 +12565,29 @@ class NetworkWindow:
             count=len(self.plot_data)
             sz=(10 if kind=='concept' else 15 if kind=='relation' else 23 if kind=='paper' else 82) if count>6000 else spec['size']
             if not focus:
-                arr=np.asarray([self.coords[k] for k in keys])
-                ax.scatter(arr[:,0],arr[:,1],arr[:,2],s=sz,c=spec['color'],
-                           marker=spec['marker'],edgecolors='none',depthshade=False,
-                           alpha=.60 if kind=='concept' and count>6000 else 1.0)
+                plain=[k for k in keys if k not in colored_nodes]
+                if plain:
+                    arr=np.asarray([self.coords[k] for k in plain])
+                    ax.scatter(arr[:,0],arr[:,1],arr[:,2],s=sz,c=spec['color'],
+                               marker=spec['marker'],edgecolors='none',depthshade=False,
+                               alpha=.60 if kind=='concept' and count>6000 else 1.0)
+                colored=[k for k in keys if k in colored_nodes]
+                if colored:
+                    arr=np.asarray([self.coords[k] for k in colored])
+                    ax.scatter(arr[:,0],arr[:,1],arr[:,2],s=max(sz*1.9,70),
+                       c=[colored_nodes[k][0] for k in colored],
+                       marker=spec['marker'],edgecolors='#eaf1f6',linewidths=.24,
+                       depthshade=False,alpha=1.)
             else:
                 for ks,clr,alpha,factor in (
                     ([k for k in keys if k not in focus],'#445063',.045,.35),
-                    ([k for k in keys if k in focus],spec['color'],1.0,2.0)):
+                    ([k for k in keys if k in focus and k not in colored_nodes],spec['color'],1.0,2.0),
+                    ([k for k in keys if k in focus and k in colored_nodes],
+                     '#ffffff',1.0,2.0)):
                     if ks:
                         arr=np.asarray([self.coords[k] for k in ks])
-                        ax.scatter(arr[:,0],arr[:,1],arr[:,2],s=sz*factor,c=clr,
+                        color_value=([colored_nodes[k][0] for k in ks] if clr=='#ffffff' else clr)
+                        ax.scatter(arr[:,0],arr[:,1],arr[:,2],s=sz*factor,c=color_value,
                                    marker=spec['marker'],depthshade=False,
                                    alpha=alpha,edgecolors='none')
         if self.chosen in self.coords:
@@ -12950,8 +13188,31 @@ class ABCNetworkWindow(NetworkWindow):
                             'description':definition,'url':'',
                             'citations':0,'support':evidence}
             else:
+                # Reserve a bounded quota for actual colored-group memories; a
+                # high-frequency literature graph may otherwise hide ALL colored groups.
+                group_filter=getattr(self,'_ssrs_selected_group_id',None)
+                if group_filter!='none':
+                    if group_filter:
+                        group_sql='WHERE g.id=?';params=(group_filter,)
+                    else:
+                        group_sql='';params=()
+                    group_ids=[r[0] for r in con.execute(
+                        'SELECT g.id FROM ssrs_memory_groups g '+group_sql+
+                        ' ORDER BY g.support DESC,g.node_count DESC,g.id LIMIT 24',params)]
+                    if group_ids:
+                        placeholders=','.join('?' for _ in group_ids)
+                        group_memories=con.execute('''SELECT u.id,u.label,u.definition,u.evidence_count
+                            FROM ssrs_memory_group_members m
+                            JOIN ssrs_memory_groups g ON g.id=m.group_id
+                            JOIN abc_units u ON u.id=m.unit_id AND u.status='active'
+                            WHERE m.group_id IN ('''+placeholders+''')
+                            GROUP BY u.id ORDER BY SUM(m.mentions) DESC,u.id LIMIT ?''',
+                            (*group_ids,min(limit//2,800))).fetchall()
+                        for uid,label,description,evidence in group_memories:
+                            selected[uid]=dict(label=label,kind='concept',description=description,
+                               url='',citations=0,support=evidence)
                 # Prioritize active associative memories, then candidates.
-                active_cap=int(limit*.79)
+                active_cap=max(0,int(limit*.79)-len(selected))
                 for uid,label,definition,status,evidence in con.execute(
                       'SELECT id,label,definition,status,evidence_count FROM abc_units '
                       "WHERE status='active' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
@@ -12961,7 +13222,7 @@ class ABCNetworkWindow(NetworkWindow):
                 for uid,label,definition,status,evidence in con.execute(
                       'SELECT id,label,definition,status,evidence_count FROM abc_units '
                       "WHERE status='candidate' ORDER BY evidence_count DESC,rowid DESC LIMIT ?",
-                      (limit-len(selected),)):
+                      (max(0,min(int(limit*.16),limit-len(selected))),)):
                     selected[uid]=dict(label=label,kind='candidate',description=definition,
                         url='',citations=0,support=evidence)
                 if len(selected)<limit:
@@ -12986,6 +13247,161 @@ class ABCNetworkWindow(NetworkWindow):
             # URLs only needed for displayed nodes; loaded lazily upon selection.
             return selected,edges,totals,dict(selected)
 
+    def ssrs_group_choice_changed(self):
+        """Select an entire source group for 3D inspection without graph mutation."""
+        label=self.ssrs_group_choice.get()
+        self._ssrs_selected_group_id=self.ssrs_group_choice_ids.get(label)
+        self._local_focus_ids=None
+        self._focus_result_ids=[]
+        self.focus_ids=set()
+        self.reload_network()
+
+    def _flin_prepare_colored_groups(self, nodes):
+        """Load bounded, persisted group membership for exactly the drawn graph.
+
+        When multiple source groups share one memory, the most-supported group
+        gets the default color. The group selector shows other memberships.
+        """
+        self._flin_visible_group_colors={}
+        self._flin_visible_group_roads=[]
+        selected_group=getattr(self,'_ssrs_selected_group_id',None)
+        with database() as con:
+            total=int(con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0])
+            groups=con.execute('''SELECT id,title,color,node_count,road_count,support
+                   FROM ssrs_memory_groups ORDER BY support DESC,node_count DESC,id LIMIT 60''').fetchall()
+            # Selected groups beyond top 60 remain valid if explicitly requested.
+            if selected_group and selected_group!='none' and not any(g[0]==selected_group for g in groups):
+                extra=con.execute('''SELECT id,title,color,node_count,road_count,support
+                       FROM ssrs_memory_groups WHERE id=?''',(selected_group,)).fetchone()
+                if extra:groups=[extra]+groups[:59]
+            # Source group ids are unambiguous; title labels can be duplicated.
+            old_value=self.ssrs_group_choice.get() if hasattr(self,'ssrs_group_choice') else ''
+            choices={'All colored groups':None,'No group colors':'none'}
+            for gid,title,color,count,roads,support in groups:
+                label=f'{title[:49]}  [{count} memories / {roads} FAST]  #{gid[-6:]}'
+                choices[label]=gid
+            self.ssrs_group_choice_ids=choices
+            if hasattr(self,'ssrs_group_combo'):
+                self.ssrs_group_combo.configure(values=list(choices))
+                if selected_group not in (None,'none'):
+                    new_label=next((lbl for lbl,gid in choices.items() if gid==selected_group),None)
+                else:
+                    new_label='No group colors' if selected_group=='none' else 'All colored groups'
+                self.ssrs_group_choice.set(new_label or 'All colored groups')
+            self.ssrs_group_summary.set(
+                f'{total:,} saved source groups | {len(groups)} selectable | '
+                'colored memories are original FLIN nodes')
+            if selected_group=='none' or not nodes:
+                shown=[]
+            else:
+                shown=[g for g in groups if selected_group is None or g[0]==selected_group][:24]
+            visible=set(nodes)
+            for gid,title,color,count,roads,support in shown:
+                for (unit_id,) in con.execute('''SELECT unit_id FROM ssrs_memory_group_members
+                     WHERE group_id=?''',(gid,)):
+                    if unit_id in visible and unit_id not in self._flin_visible_group_colors:
+                        self._flin_visible_group_colors[unit_id]=(color,gid)
+                for a,b in con.execute('''SELECT src,dst FROM ssrs_memory_group_roads
+                     WHERE group_id=?''',(gid,)):
+                    if a in visible and b in visible:
+                        self._flin_visible_group_roads.append((gid,color,a,b))
+        if hasattr(self,'ssrs_group_legend'):
+            for old in self.ssrs_group_legend.winfo_children():old.destroy()
+            for gid,title,color,count,roads,support in shown[:7]:
+                tk.Label(self.ssrs_group_legend,bg=self.PANEL,fg=color,
+                    text=f'● {title[:33]}  — {count} memories, {roads} FAST roads',
+                    anchor='w',font=('Arial',9)).pack(fill='x')
+            if total>len(shown):
+                tk.Label(self.ssrs_group_legend,bg=self.PANEL,fg=self.MUTED,
+                    text=f'… {total-len(shown):,} more groups (use the selector / inspector)',
+                    anchor='w',font=('Arial',9)).pack(fill='x')
+
+    def flin_ssrs_groups_window(self):
+        """Browse actual source-specific groups; focus member nodes on main 3D."""
+        existing=getattr(self,'_flin_groups_window',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift();return
+        win=tk.Toplevel(self.root)
+        self._flin_groups_window=win
+        win.title('FLIN | SSRS Fast Memory Groups & Source Evidence')
+        win.geometry('1160x730');win.minsize(800,520)
+        win.configure(bg=self.BG)
+        container=ttk.Frame(win,style='Dark.TFrame',padding=12);container.pack(fill='both',expand=True)
+        self.label(container,'Persisted groups formed by repeated observations within each document or paper. '
+            'A fast road must exist in the directed FLIN graph; grouping never invents reverse edges.',
+            note=True,wraplength=1090).pack(fill='x')
+        top=ttk.Frame(container,style='Dark.TFrame');top.pack(fill='x',pady=(8,4))
+        count_var=tk.StringVar(value='')
+        self.label(top,'',textvariable=count_var,note=True).pack(side='left')
+        table=ttk.Treeview(container,columns=('name','memories','roads','support'),
+                           show='headings',height=10,style='Dark.Treeview')
+        for col,heading,width in [('name','Source / group',620),('memories','Memories',100),
+                                   ('roads','FAST roads',110),('support','Source observations',160)]:
+            table.heading(col,text=heading);table.column(col,width=width,anchor='w')
+        table.pack(fill='x',pady=4)
+        detail=tk.Text(container,height=16,wrap='word',bg=self.FIELD,fg=self.FG,
+                       relief='flat',padx=10,pady=9,font=('DejaVu Sans',10))
+        detail.pack(fill='both',expand=True,pady=(7,5))
+        records={}
+        def refill():
+            nonlocal records
+            records={}
+            table.delete(*table.get_children())
+            with database() as con:
+                groups=flin_ssrs_list_groups(con,limit=300)
+                total=con.execute('SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
+            count_var.set(f'Saved groups: {total:,} | showing {len(groups):,}; select a row to inspect evidence.')
+            for group in groups:
+                iid=table.insert('','end',values=(group['title'],group['node_count'],
+                     group['road_count'],group['support']))
+                records[iid]=group
+            if records:table.selection_set(next(iter(records)))
+        def show_group(_=None):
+            ids=table.selection()
+            if not ids:return
+            group=records.get(ids[0]);
+            if not group:return
+            lines=[f"{group['title']}  |  {group['color']}",
+                   f"Source ID: {group['source_id']}",
+                   f"Members: {group['node_count']}; directed FAST roads: {group['road_count']}; source evidence votes: {group['support']}",
+                   '', 'MEMORY UNITS  (count = distinct source input clusters)']
+            lines.extend(f"  {m['label']}  — {m['mentions']} observations" for m in group['members'][:150])
+            lines+=['','DIRECTED FAST ROADS (real outgoing directions only)']
+            lines.extend(f"  {r['source']} → {r['target']}  ({r['source_support']} source-position supports)"
+                for r in group['roads'][:150])
+            with database() as con:
+                examples=con.execute('''SELECT DISTINCT c.quote FROM ssrs_road_evidence e
+                        JOIN abc_input_clusters c ON c.id=e.cluster_id
+                        JOIN ssrs_memory_group_roads gr ON gr.src=e.src AND gr.dst=e.dst
+                        WHERE gr.group_id=? AND e.source_id=? LIMIT 8''',
+                        (group['id'],group['source_id'])).fetchall()
+            lines+=['','SOURCE QUOTES (observations; not validated math proofs)']
+            lines.extend('  • '+str(q[0])[:460] for q in examples)
+            detail.configure(state='normal');detail.delete('1.0','end');detail.insert('1.0','\n'.join(lines));detail.configure(state='disabled')
+        def focus():
+            selection=table.selection()
+            if not selection:return
+            group=records.get(selection[0]);
+            if not group:return
+            self._ssrs_selected_group_id=group['id']
+            self._local_focus_ids=None
+            self._focus_result_ids=[]
+            self.focus_ids=set()
+            self.reload_network()
+            members={m['id'] for m in group['members']}
+            self.focus_ids=members & set(self.plot_data)
+            if self.focus_ids:
+                self.draw(preserve_view=False)
+            self.status.set(f"SSRS group focused: {group['title'][:65]} | {len(self.focus_ids)} displayed memories")
+            self.root.lift()
+        table.bind('<<TreeviewSelect>>',show_group)
+        buttons=ttk.Frame(container,style='Dark.TFrame');buttons.pack(fill='x')
+        ttk.Button(buttons,text='Show Group in Main 3D Network',command=focus,
+                   style='Accent.TButton').pack(side='left',padx=(0,8))
+        ttk.Button(buttons,text='Refresh Groups',command=lambda:(refill(),self.reload_network()),
+                   style='Dark.TButton').pack(side='left')
+        refill();show_group()
+
     def reload_network(self):
         try:
             previous=set(self.plot_data)
@@ -12998,8 +13414,9 @@ class ABCNetworkWindow(NetworkWindow):
                              f"FLIN triggerable memories {status['active']:,} / old candidates {status['candidates']:,}")
             self.network_math_count.set(f"FLIN links {status['edges']:,} | shortcuts {status['shortcuts']:,} | "
                                         f"effective input clusters {status['input_clusters']:,}")
-            self._viewport_empty_reason='Start building to create FLIN memories directly from mathematics literature.'
+            self._viewport_empty_reason='Create an empty FLIN network, then read a math document or start literature collection.'
             self.all_nodes=all_nodes;self.plot_data=nodes;self.edges=edges
+            self._flin_prepare_colored_groups(nodes)
             if self.chosen not in nodes:self.chosen=None;self.path=[]
             self.focus_ids=set(getattr(self,'focus_ids',set()))&set(nodes)
             self.coords={k:v for k,v in self.coords.items() if k in nodes and
@@ -13045,6 +13462,10 @@ class ABCNetworkWindow(NetworkWindow):
             evidence=con.execute("""SELECT s.title,e.explanation,e.url FROM abc_evidence e
                 LEFT JOIN abc_sources s ON s.id=e.source_id
                 WHERE e.unit_id=? ORDER BY e.source_id LIMIT 7""",(key,)).fetchall()
+            membership=con.execute('''SELECT g.title,g.color,m.mentions,g.source_id
+              FROM ssrs_memory_group_members m
+              JOIN ssrs_memory_groups g ON g.id=m.group_id
+              WHERE m.unit_id=? ORDER BY g.support DESC LIMIT 12''',(key,)).fetchall()
         self._selected_abc_sources=[r[2] for r in evidence if r[2].startswith('https://')]
         lines=[node['label'],'','Status: '+('Established / Triggerable' if node['kind']=='concept' else 'Legacy candidate'),
                f"Effective input exposures: {exposure[0] if exposure else 0}",
@@ -13056,6 +13477,10 @@ class ABCNetworkWindow(NetworkWindow):
             lines+=[' routing probability by Currently eligible outgoing links Weight normalize ; prevent backtracking / Revisits Limit can can change proportions .']
         else:
             lines+=['','This memory can receive effective input but currently has no eligible outgoing links.']
+        if membership:
+            lines+=['','SSRS fast memory groups (source-specific visual labels):']
+            lines += [f'• {title[:80]} | {color} | observed in {n} source clusters'
+                for title,color,n,sid in membership]
         if evidence:
             lines+=['','Original source statements (not verified theorems)']
             lines += [f'• {(title or " Source ")[:85]}:{sentence[:210]}'
@@ -13149,7 +13574,10 @@ class ABCNetworkWindow(NetworkWindow):
             return
         with database() as con:
             with con:
-                for tab in ('abc_feedback','abc_pulse_events','abc_runs','abc_cluster_links',
+                for tab in ('ssrs_memory_group_roads','ssrs_memory_group_members',
+                            'ssrs_memory_groups','ssrs_road_evidence','ssrs_fast_roads',
+                            'ssrs_document_read_sessions','ssrs_document_reads',
+                            'abc_feedback','abc_pulse_events','abc_runs','abc_cluster_links',
                             'abc_cluster_features','abc_replay_queue','abc_input_clusters',
                             'abc_learning_events','abc_evidence','abc_ssrs','abc_edges',
                             'abc_positions','abc_units','abc_source_topics','abc_sources',
@@ -13168,6 +13596,8 @@ class ABCNetworkWindow(NetworkWindow):
                     con.execute('DELETE FROM association_runs WHERE id=?',(aid,))
         self.coords={};self.chosen=None;self.path=[]
         self._local_focus_ids=None;self._focus_result_ids=[];self.focus_ids=set()
+        self._ssrs_selected_group_id=None
+        self._flin_visible_group_colors={};self._flin_visible_group_roads=[]
         self.has_started=False
         self.abc_refresh_status();self.reload_network()
 
@@ -13303,6 +13733,8 @@ if __name__ == "__main__":
     parser.add_argument('--ssrs-read-document',metavar='FILE',
                         help='Read a TXT/PDF/Markdown/HTML math article, learn inputs and form durable SSRS fast roads')
     parser.add_argument('--ssrs-report',action='store_true',help='Show real persisted SSRS fast roads and learning evidence')
+    parser.add_argument('--ssrs-groups-report',action='store_true',help='Show persistent color-coded SSRS memory groups')
+    parser.add_argument('--ssrs-rebuild-groups',type=int,metavar='SOURCES',help='Rebuild groups for up to N saved sources (resumable)')
     parser.add_argument('--ssrs-example',metavar='TXT',help='Create a synthetic sample mathematical article for SSRS testing')
     parser.add_argument('--ssrs-self-test',action='store_true',
                         help='Run offline document/SSRS regression tests using a temporary isolated database')
@@ -13397,6 +13829,14 @@ if __name__ == "__main__":
             sys.exit(1)
     if args.ssrs_example:
         print('Sample mathematics article:',flin_ssrs_write_example(args.ssrs_example))
+        sys.exit(0)
+    if args.ssrs_groups_report:
+        with database() as con:
+            print(json.dumps(flin_ssrs_list_groups(con,limit=100),ensure_ascii=False,indent=2))
+        sys.exit(0)
+    if args.ssrs_rebuild_groups is not None:
+        with database() as con:
+            print(json.dumps(flin_ssrs_rebuild_existing_groups(con,limit=args.ssrs_rebuild_groups),ensure_ascii=False,indent=2))
         sys.exit(0)
     if args.ssrs_report:
         with database() as con:
