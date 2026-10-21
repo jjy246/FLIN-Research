@@ -9895,19 +9895,17 @@ class NetworkWindow:
         top=ttk.Frame(graph,style='Dark.TFrame',padding=(9,5));top.pack(fill='x')
         ttk.Label(top,text='FLIN Memory Network | 3D',style='Dark.TLabel',
                   font=('Arial',12,'bold')).pack(side='left')
-        self.graph_stats=tk.StringVar(value='No nodes in the database')
-        # Status is deliberately on its own responsive row. A long count such
-        # as '12,345/1,511,826' must not collide with the 3D view title.
+        self.graph_stats=tk.StringVar(value='Memories: 0  |  Links: 0  |  Fast groups: 0')
+        # Keep the upper-right network summary to just three STORED counts.
+        # Use a separate, right-aligned row so the values never collide with
+        # the title when the desktop window is narrow.
         self.graph_stats_label=ttk.Label(graph,textvariable=self.graph_stats,
-                style='Dark.TLabel',padding=(12,2),anchor='w',justify='left',wraplength=710)
+                style='Dark.TLabel',padding=(12,2),anchor='e',justify='right')
         self.graph_stats_label.pack(fill='x')
-        self.graph_phase=tk.StringVar(value='Overview mode: established memories; search loads actual local associations')
-        self.graph_phase_label=ttk.Label(graph,textvariable=self.graph_phase,
-                style='Dark.TLabel',padding=(12,3),justify='left',wraplength=710)
-        self.graph_phase_label.pack(fill='x')
-        for caption in (self.graph_stats_label,self.graph_phase_label):
-            caption.bind('<Configure>',lambda ev,w=caption:
-                w.configure(wraplength=max(240,ev.width-26)))
+        # Other code still updates graph_phase for progress/diagnostics. Keep
+        # the variable for compatibility, but do not show a second status line
+        # in the upper-right summary area.
+        self.graph_phase=tk.StringVar(value='')
         foot=ttk.Frame(graph,style='Dark.TFrame',padding=(9,7));foot.pack(side='bottom',fill='x')
         legend=ttk.Frame(foot,style='Dark.TFrame');legend.pack(fill='x',pady=(0,4))
         for kind,spec in NODE_STYLES.items():
@@ -14352,25 +14350,17 @@ class ABCNetworkWindow(NetworkWindow):
             nodes,edges,totals,all_nodes=self.get_network()
             with database() as con:
                 status=abc_status(con)
-                isolated=con.execute('''SELECT COUNT(*) FROM abc_units u
-                    WHERE u.status='active'
-                    AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.src=u.id)
-                    AND NOT EXISTS(SELECT 1 FROM abc_edges e WHERE e.dst=u.id)''').fetchone()[0]
                 ready=flin_ssrs_dynamic_ready(con)
-                fast_count=con.execute("SELECT COUNT(*) FROM ssrs_fast_road_state WHERE status='active'" if ready else
-                        'SELECT COUNT(*) FROM ssrs_fast_roads').fetchone()[0]
-                group_count=con.execute("SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'" if ready else
-                        'SELECT COUNT(*) FROM ssrs_memory_groups').fetchone()[0]
-                pending=con.execute('SELECT COUNT(*) FROM abc_replay_queue').fetchone()[0]
+                group_count=con.execute(
+                    "SELECT COUNT(*) FROM ssrs_dynamic_groups WHERE status='active'"
+                    if ready else 'SELECT COUNT(*) FROM ssrs_memory_groups'
+                ).fetchone()[0]
             total_memories=status['active']+status['candidates']
-            isolated_pct=100*isolated/max(1,status['active'])
+            # Display actual persistent graph totals, never the 3D sample size.
+            # Dormant/archived groups do not count as currently fast groups.
             self.graph_stats.set(
-                f"3D sample: {len(nodes):,}/{total_memories:,} memories; "
-                f"{len(edges):,} displayed of {status['edges']:,} stored directed links.\n"
-                f"SQLite: {status['active']:,} active; {status['candidates']:,} candidates; "
-                f"{isolated:,} isolated ({isolated_pct:.1f}%); "
-                f"{fast_count:,} SSRS fast roads; {group_count:,} colored groups; "
-                f"{pending:,} queued input clusters.")
+                f"Memories: {total_memories:,}  |  "
+                f"Links: {status['edges']:,}  |  Fast groups: {group_count:,}")
             self.counter.set(f"Source topics {status['topics']:,} / papers and Wikipedia {status['learned_sources']:,}\n"
                              f"FLIN triggerable memories {status['active']:,} / old candidates {status['candidates']:,}")
             self.network_math_count.set(f"FLIN links {status['edges']:,} | shortcuts {status['shortcuts']:,} | "
